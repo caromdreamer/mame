@@ -38,6 +38,8 @@
 #include "render.h"
 #include "cheat.h"
 #include "rendfont.h"
+
+#include <cstdlib>
 #include "rendlay.h"
 #include "romload.h"
 #include "screen.h"
@@ -661,6 +663,8 @@ void mame_ui_manager::display_startup_screens(bool first_time)
 	// disable everything if we are using -str for 300 or fewer seconds, or if we're the empty driver,
 	// or if we are debugging, or if there's no mame window to send inputs to
 	if (!first_time || (str > 0 && str < 60*5) || &machine().system() == &GAME_NAME(___empty) || (machine().debug_flags & DEBUG_FLAG_ENABLED) || video_none)
+		show_gameinfo = show_warnings = false;
+	if (std::getenv("KN_MAME"))
 		show_gameinfo = show_warnings = false;
 
 #if defined(__EMSCRIPTEN__)

@@ -20,6 +20,7 @@
 #include "clifront.h"
 #include "emuopts.h"
 #include "fileio.h"
+#include "kaillera_next_adapter.h"
 #include "luaengine.h"
 #include "mameopts.h"
 #include "pluginopts.h"
@@ -372,6 +373,13 @@ void mame_machine_manager::before_load_settings(running_machine& machine)
 
 void mame_machine_manager::create_custom(running_machine &machine)
 {
+	m_kaillera_next = kaillera_next_adapter::create(machine);
+	if (m_kaillera_next)
+	{
+		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&kaillera_next_adapter::frame_done, m_kaillera_next.get()));
+		machine.add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&kaillera_next_adapter::on_exit, m_kaillera_next.get()));
+	}
+
 	// start the inifile manager
 	m_inifile = std::make_unique<inifile_manager>(m_ui->options());
 
@@ -405,6 +413,14 @@ void mame_machine_manager::load_cheatfiles(running_machine& machine)
 {
 	// set up the cheat engine
 	m_cheat = std::make_unique<cheat_manager>(machine);
+}
+
+bool mame_machine_manager::kaillera_next_tick(running_machine &machine)
+{
+	if (!m_kaillera_next)
+		return false;
+
+	return m_kaillera_next->tick();
 }
 
 //-------------------------------------------------
