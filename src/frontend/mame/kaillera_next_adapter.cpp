@@ -9,6 +9,7 @@
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -26,14 +27,14 @@ using kn_client_poll_network_fn = KnResult (*)(KnClient *);
 using kn_client_get_metrics_fn = KnResult (*)(KnClient *, KnMetrics *);
 using kn_client_leave_fn = void (*)(KnClient *);
 
-constexpr u8 KN_PAC_UP = 0x01;
-constexpr u8 KN_PAC_LEFT = 0x02;
-constexpr u8 KN_PAC_RIGHT = 0x04;
-constexpr u8 KN_PAC_DOWN = 0x08;
-constexpr u8 KN_PAC_COIN = 0x10;
-constexpr u8 KN_PAC_START = 0x20;
-constexpr u8 KN_PAC_BUTTON1 = 0x40;
-constexpr u8 KN_PAC_BUTTON2 = 0x80;
+constexpr u8 KN_INPUT_UP = 0x01;
+constexpr u8 KN_INPUT_LEFT = 0x02;
+constexpr u8 KN_INPUT_RIGHT = 0x04;
+constexpr u8 KN_INPUT_DOWN = 0x08;
+constexpr u8 KN_INPUT_COIN = 0x10;
+constexpr u8 KN_INPUT_START = 0x20;
+constexpr u8 KN_INPUT_BUTTON1 = 0x40;
+constexpr u8 KN_INPUT_BUTTON2 = 0x80;
 
 const char *env_value(const char *name, const char *fallback)
 {
@@ -69,13 +70,13 @@ u8 scripted_pacman_input(u32 frame, u32 player)
 		if (player == 0)
 		{
 			if (frame < 30)
-				input |= KN_PAC_COIN;
+				input |= KN_INPUT_COIN;
 			if (frame >= 45 && frame < 75)
-				input |= KN_PAC_START;
+				input |= KN_INPUT_START;
 		}
 		else if (player == 1 && frame >= 75 && frame < 105)
 		{
-			input |= KN_PAC_START;
+			input |= KN_INPUT_START;
 		}
 	}
 
@@ -83,13 +84,13 @@ u8 scripted_pacman_input(u32 frame, u32 player)
 	switch (phase)
 	{
 	case 0:
-		return input | KN_PAC_RIGHT | KN_PAC_BUTTON1;
+		return input | KN_INPUT_RIGHT | KN_INPUT_BUTTON1;
 	case 1:
-		return input | KN_PAC_DOWN | KN_PAC_BUTTON2;
+		return input | KN_INPUT_DOWN | KN_INPUT_BUTTON2;
 	case 2:
-		return input | KN_PAC_LEFT | KN_PAC_BUTTON1;
+		return input | KN_INPUT_LEFT | KN_INPUT_BUTTON1;
 	default:
-		return input | KN_PAC_UP;
+		return input | KN_INPUT_UP;
 	}
 }
 
@@ -100,9 +101,9 @@ u8 scripted_start_input(u32 frame, u32 player)
 
 	u8 input = 0;
 	if (frame >= 30 && frame < 45)
-		input |= KN_PAC_COIN;
+		input |= KN_INPUT_COIN;
 	if (frame >= 75 && frame < 90)
-		input |= KN_PAC_START;
+		input |= KN_INPUT_START;
 	return input;
 }
 
@@ -128,6 +129,13 @@ bool load_symbol(void *library, const char *name, T &out)
 	}
 	return true;
 }
+
+struct mapped_input_field
+{
+	ioport_field *field;
+	u32 player;
+	u8 bit;
+};
 
 } // namespace
 
@@ -161,9 +169,10 @@ struct kaillera_next_adapter::impl
 	u32 last_paced_frame = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
-	u8 last_applied_coin = 0xff;
 	std::chrono::steady_clock::time_point next_frame_at = {};
+	std::vector<mapped_input_field> input_map;
 	bool warned_missing_ports = false;
+	bool input_map_built = false;
 	bool trace = false;
 	bool initialized = false;
 	bool reported_exit = false;
@@ -171,131 +180,97 @@ struct kaillera_next_adapter::impl
 	bool networked = false;
 };
 
-static void set_field(ioport_port *port, ioport_value mask, bool pressed, bool lockout = true)
+static void set_field(ioport_field *field, bool pressed, bool lockout = true)
 {
-	if (!port)
+	if (!field)
 		return;
-
-	ioport_field *field = port->field(mask);
-	if (field)
-	{
-		field->live().lockout = lockout;
-		field->set_value(pressed ? 1 : 0);
-	}
+	field->live().lockout = lockout;
+	field->set_value(pressed ? 1 : 0);
 }
 
-static bool is_bublbobl_machine(running_machine &machine)
+static bool field_pressed(running_machine &machine, ioport_field *field)
 {
-	std::string const name = machine.system().name;
-	return name == "bublbobl" || name == "bublbobl1" || name == "bublboblr" || name == "bublboblr1" || name == "boblbobl";
-}
-
-static bool field_pressed(running_machine &machine, ioport_port *port, ioport_value mask)
-{
-	if (!port)
-		return false;
-
-	ioport_field *field = port->field(mask);
 	return field && machine.input().seq_pressed(field->seq());
 }
 
-static void apply_pacman_player(running_machine &machine, u32 player, u8 input)
+static u8 bit_for_field(ioport_field &field)
 {
-	ioport_port *in0 = machine.root_device().ioport("IN0");
-	ioport_port *in1 = machine.root_device().ioport("IN1");
-
-	if (!in0 || !in1)
-		return;
-
-	if (player == 0)
+	switch (field.type())
 	{
-		set_field(in0, 0x01, input & KN_PAC_UP);
-		set_field(in0, 0x02, input & KN_PAC_LEFT);
-		set_field(in0, 0x04, input & KN_PAC_RIGHT);
-		set_field(in0, 0x08, input & KN_PAC_DOWN);
-		set_field(in0, 0x20, input & KN_PAC_COIN);
-		set_field(in1, 0x20, input & KN_PAC_START);
+	case IPT_JOYSTICK_UP:
+	case IPT_JOYSTICKLEFT_UP:
+	case IPT_JOYSTICKRIGHT_UP:
+		return KN_INPUT_UP;
+	case IPT_JOYSTICK_LEFT:
+	case IPT_JOYSTICKLEFT_LEFT:
+	case IPT_JOYSTICKRIGHT_LEFT:
+		return KN_INPUT_LEFT;
+	case IPT_JOYSTICK_RIGHT:
+	case IPT_JOYSTICKLEFT_RIGHT:
+	case IPT_JOYSTICKRIGHT_RIGHT:
+		return KN_INPUT_RIGHT;
+	case IPT_JOYSTICK_DOWN:
+	case IPT_JOYSTICKLEFT_DOWN:
+	case IPT_JOYSTICKRIGHT_DOWN:
+		return KN_INPUT_DOWN;
+	case IPT_START:
+	case IPT_SELECT:
+		return field.type() == IPT_START ? KN_INPUT_START : KN_INPUT_COIN;
+	default:
+		break;
 	}
-	else if (player == 1)
+
+	if (field.type() >= IPT_COIN1 && field.type() <= IPT_COIN12)
+		return KN_INPUT_COIN;
+	if (field.type() >= IPT_START1 && field.type() <= IPT_START10)
+		return KN_INPUT_START;
+	if (field.type() >= IPT_BUTTON1 && field.type() <= IPT_BUTTON16)
 	{
-		set_field(in1, 0x01, input & KN_PAC_UP);
-		set_field(in1, 0x02, input & KN_PAC_LEFT);
-		set_field(in1, 0x04, input & KN_PAC_RIGHT);
-		set_field(in1, 0x08, input & KN_PAC_DOWN);
-		set_field(in0, 0x40, input & KN_PAC_COIN);
-		set_field(in1, 0x40, input & KN_PAC_START);
+		u32 const button = u32(field.type()) - u32(IPT_BUTTON1);
+		if (button == 0)
+			return KN_INPUT_BUTTON1;
+		if (button == 1)
+			return KN_INPUT_BUTTON2;
 	}
+	return 0;
 }
 
-static void apply_bublbobl_coin(running_machine &machine, bool pressed)
+static u32 player_for_field(ioport_field &field)
 {
-	ioport_port *coin = machine.root_device().ioport("IN0");
-	if (!coin)
+	if (field.type() >= IPT_START1 && field.type() <= IPT_START10)
+		return u32(field.type()) - u32(IPT_START1);
+	if (field.type() >= IPT_COIN1 && field.type() <= IPT_COIN12)
+		return u32(field.type()) - u32(IPT_COIN1);
+	return field.player();
+}
+
+static void build_input_map(kaillera_next_adapter::impl &adapter)
+{
+	if (adapter.input_map_built)
 		return;
 
-	set_field(coin, 0x04, pressed);
+	for (auto &port : adapter.machine.ioport().ports())
+	{
+		for (ioport_field &field : port.second->fields())
+		{
+			u8 bit = bit_for_field(field);
+			if (!bit)
+				continue;
+			if (field.is_analog())
+				continue;
+			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), bit});
+		}
+	}
+
+	adapter.input_map_built = true;
+	if (adapter.trace)
+		osd_printf_info("Kaillera Next trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
 }
 
-static void apply_bublbobl_player(running_machine &machine, u32 player, u8 input)
+static void sync_programmatic_inputs(kaillera_next_adapter::impl &adapter)
 {
-	ioport_port *port = machine.root_device().ioport(player == 0 ? "IN1" : "IN2");
-
-	if (!port)
-		return;
-
-	set_field(port, 0x08, input & KN_PAC_UP);
-	set_field(port, 0x01, input & KN_PAC_LEFT);
-	set_field(port, 0x02, input & KN_PAC_RIGHT);
-	set_field(port, 0x04, input & KN_PAC_DOWN);
-	set_field(port, 0x20, input & KN_PAC_BUTTON1);
-	set_field(port, 0x10, input & KN_PAC_BUTTON2);
-	set_field(port, 0x40, input & KN_PAC_START);
-}
-
-static u8 read_bublbobl_p1_controls(running_machine &machine)
-{
-	ioport_port *coin = machine.root_device().ioport("IN0");
-	ioport_port *p1 = machine.root_device().ioport("IN1");
-
-	u8 input = 0;
-	if (field_pressed(machine, p1, 0x08))
-		input |= KN_PAC_UP;
-	if (field_pressed(machine, p1, 0x01))
-		input |= KN_PAC_LEFT;
-	if (field_pressed(machine, p1, 0x02))
-		input |= KN_PAC_RIGHT;
-	if (field_pressed(machine, p1, 0x04))
-		input |= KN_PAC_DOWN;
-	if (field_pressed(machine, coin, 0x04))
-		input |= KN_PAC_COIN;
-	if (field_pressed(machine, p1, 0x40))
-		input |= KN_PAC_START;
-	if (field_pressed(machine, p1, 0x20))
-		input |= KN_PAC_BUTTON1;
-	if (field_pressed(machine, p1, 0x10))
-		input |= KN_PAC_BUTTON2;
-	return input;
-}
-
-static u8 read_pacman_p1_controls(running_machine &machine)
-{
-	ioport_port *in0 = machine.root_device().ioport("IN0");
-	ioport_port *in1 = machine.root_device().ioport("IN1");
-
-	u8 input = 0;
-	if (field_pressed(machine, in0, 0x01))
-		input |= KN_PAC_UP;
-	if (field_pressed(machine, in0, 0x02))
-		input |= KN_PAC_LEFT;
-	if (field_pressed(machine, in0, 0x04))
-		input |= KN_PAC_RIGHT;
-	if (field_pressed(machine, in0, 0x08))
-		input |= KN_PAC_DOWN;
-	if (field_pressed(machine, in0, 0x20))
-		input |= KN_PAC_COIN;
-	if (field_pressed(machine, in1, 0x20))
-		input |= KN_PAC_START;
-	return input;
+	for (auto &port : adapter.machine.ioport().ports())
+		port.second->frame_update();
 }
 
 static u8 read_default_keyboard(running_machine &machine)
@@ -304,52 +279,54 @@ static u8 read_default_keyboard(running_machine &machine)
 	input_manager &keys = machine.input();
 
 	if (keys.code_pressed(KEYCODE_UP))
-		input |= KN_PAC_UP;
+		input |= KN_INPUT_UP;
 	if (keys.code_pressed(KEYCODE_LEFT))
-		input |= KN_PAC_LEFT;
+		input |= KN_INPUT_LEFT;
 	if (keys.code_pressed(KEYCODE_RIGHT))
-		input |= KN_PAC_RIGHT;
+		input |= KN_INPUT_RIGHT;
 	if (keys.code_pressed(KEYCODE_DOWN))
-		input |= KN_PAC_DOWN;
+		input |= KN_INPUT_DOWN;
 	if (keys.code_pressed(KEYCODE_5) || keys.code_pressed(KEYCODE_5_PAD))
-		input |= KN_PAC_COIN;
+		input |= KN_INPUT_COIN;
 	if (keys.code_pressed(KEYCODE_1) || keys.code_pressed(KEYCODE_1_PAD))
-		input |= KN_PAC_START;
+		input |= KN_INPUT_START;
 	if (keys.code_pressed(KEYCODE_LCONTROL) || keys.code_pressed(KEYCODE_RCONTROL) || keys.code_pressed(KEYCODE_Z) || keys.code_pressed(KEYCODE_SPACE))
-		input |= KN_PAC_BUTTON1;
+		input |= KN_INPUT_BUTTON1;
 	if (keys.code_pressed(KEYCODE_LALT) || keys.code_pressed(KEYCODE_RALT) || keys.code_pressed(KEYCODE_X))
-		input |= KN_PAC_BUTTON2;
+		input |= KN_INPUT_BUTTON2;
 
 	return input;
 }
 
-static u8 read_local_input(running_machine &machine)
+static u8 read_local_input(kaillera_next_adapter::impl &adapter)
 {
-	u8 input = is_bublbobl_machine(machine) ? read_bublbobl_p1_controls(machine) : read_pacman_p1_controls(machine);
-	input |= read_default_keyboard(machine);
+	build_input_map(adapter);
+
+	u8 input = 0;
+	u32 const source_player = env_u32("KN_MAME_LOCAL_CONTROL_PLAYER", 0);
+	for (mapped_input_field &mapped : adapter.input_map)
+	{
+		if (mapped.player == source_player && field_pressed(adapter.machine, mapped.field))
+			input |= mapped.bit;
+	}
+	input |= read_default_keyboard(adapter.machine);
 	return input;
 }
 
 static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnInput *players, u32 player_count)
 {
 	bool apply_to_mame = env_enabled("KN_MAME_APPLY_INPUT");
-	bool local_input_mode = env_enabled("KN_MAME_LOCAL_INPUT");
-	bool bublbobl = is_bublbobl_machine(adapter.machine);
-	ioport_port *in0 = adapter.machine.root_device().ioport("IN0");
-	ioport_port *in1 = adapter.machine.root_device().ioport("IN1");
-	ioport_port *in2 = adapter.machine.root_device().ioport("IN2");
-	if (apply_to_mame && (!in0 || !in1 || (bublbobl && !in2)))
+	build_input_map(adapter);
+	if (apply_to_mame && adapter.input_map.empty())
 	{
 		if (!adapter.warned_missing_ports)
 		{
-			osd_printf_error("Kaillera Next: required input ports are not available; skipping input injection\n");
+			osd_printf_error("Kaillera Next: no mappable digital input fields are available; skipping input injection\n");
 			adapter.warned_missing_ports = true;
 		}
 		return;
 	}
 
-	u8 shared_remote_input = 0;
-	u8 shared_coin_input = 0;
 	for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
 	{
 		u8 input = 0;
@@ -360,34 +337,26 @@ static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnIn
 		if (adapter.trace && player < 2 && input != adapter.last_applied_input[player])
 		{
 			osd_printf_info("Kaillera Next trace: apply_input frame=%u player=%u input=%02x machine=%s\n",
-					adapter.frame_count, player, input, bublbobl ? "bublbobl" : "pacman");
+					adapter.frame_count, player, input, adapter.machine.system().name);
 			adapter.last_applied_input[player] = input;
 		}
-		if (bublbobl && apply_to_mame)
-		{
-			apply_bublbobl_player(adapter.machine, player, input);
-			shared_coin_input |= input & KN_PAC_COIN;
-		}
-		else if (local_input_mode && player != adapter.player_id)
-			shared_remote_input |= input;
-		else if (apply_to_mame && !local_input_mode)
-			apply_pacman_player(adapter.machine, player, input);
 	}
-	if (bublbobl && apply_to_mame)
-	{
-		if (adapter.trace && shared_coin_input != adapter.last_applied_coin)
-		{
-			osd_printf_info("Kaillera Next trace: apply_coin frame=%u input=%02x\n", adapter.frame_count, shared_coin_input);
-			adapter.last_applied_coin = shared_coin_input;
-		}
-		apply_bublbobl_coin(adapter.machine, shared_coin_input);
-	}
-	if (!bublbobl && apply_to_mame && local_input_mode)
-		apply_pacman_player(adapter.machine, 0, shared_remote_input);
+
 	if (apply_to_mame)
 	{
-		for (auto &port : adapter.machine.ioport().ports())
-			port.second->frame_update();
+		std::array<u8, 2> inputs = {};
+		for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
+		{
+			if (players && players[player].bytes && players[player].len > 0)
+				inputs[player] = players[player].bytes[0];
+		}
+
+		for (mapped_input_field &mapped : adapter.input_map)
+		{
+			u8 input = mapped.player < inputs.size() ? inputs[mapped.player] : 0;
+			set_field(mapped.field, input & mapped.bit);
+		}
+		sync_programmatic_inputs(adapter);
 	}
 	adapter.injected_frame_count++;
 }
@@ -402,7 +371,7 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	out_input->len = std::min<u32>(out_input->cap, adapter->input_size);
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
-		u8 input = read_local_input(adapter->machine) | scripted_start_input(input_frame, adapter->player_id);
+		u8 input = read_local_input(*adapter) | scripted_start_input(input_frame, adapter->player_id);
 		if (adapter->trace && input != adapter->last_local_input)
 			osd_printf_info("Kaillera Next trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, input);
 		out_input->bytes[0] = input;
