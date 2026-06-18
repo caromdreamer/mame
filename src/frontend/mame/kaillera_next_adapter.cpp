@@ -376,41 +376,10 @@ static void sync_programmatic_inputs(kaillera_next_adapter::impl &adapter)
 		port.second->frame_update();
 }
 
-static u8 read_default_keyboard(running_machine &machine)
-{
-	u8 input = 0;
-	input_manager &keys = machine.input();
-
-	if (keys.code_pressed(KEYCODE_UP))
-		input |= KN_INPUT_UP;
-	if (keys.code_pressed(KEYCODE_LEFT))
-		input |= KN_INPUT_LEFT;
-	if (keys.code_pressed(KEYCODE_RIGHT))
-		input |= KN_INPUT_RIGHT;
-	if (keys.code_pressed(KEYCODE_DOWN))
-		input |= KN_INPUT_DOWN;
-	if (keys.code_pressed(KEYCODE_5) || keys.code_pressed(KEYCODE_5_PAD))
-		input |= KN_INPUT_COIN;
-	if (keys.code_pressed(KEYCODE_1) || keys.code_pressed(KEYCODE_1_PAD))
-		input |= KN_INPUT_START;
-	if (keys.code_pressed(KEYCODE_LCONTROL) || keys.code_pressed(KEYCODE_RCONTROL) || keys.code_pressed(KEYCODE_Z) || keys.code_pressed(KEYCODE_SPACE))
-		input |= KN_INPUT_BUTTON1;
-	if (keys.code_pressed(KEYCODE_LALT) || keys.code_pressed(KEYCODE_RALT) || keys.code_pressed(KEYCODE_X))
-		input |= KN_INPUT_BUTTON2;
-
-	return input;
-}
-
 static void set_input_bit(u8 *bytes, u32 len, u32 byte, u8 bit)
 {
 	if (bytes && byte < len)
 		bytes[byte] |= bit;
-}
-
-static void read_default_keyboard(running_machine &machine, u8 *bytes, u32 len)
-{
-	if (bytes && len > 0)
-		bytes[0] |= read_default_keyboard(machine);
 }
 
 static void read_local_input(kaillera_next_adapter::impl &adapter, u8 *bytes, u32 len)
@@ -423,8 +392,6 @@ static void read_local_input(kaillera_next_adapter::impl &adapter, u8 *bytes, u3
 		if (mapped.player == source_player && field_pressed(adapter.machine, mapped.field))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
-	if (env_enabled("KN_MAME_DEFAULT_KEYS"))
-		read_default_keyboard(adapter.machine, bytes, len);
 }
 
 static bool mapped_input_pressed(const KnInput *players, u32 player_count, mapped_input_field const &mapped)
