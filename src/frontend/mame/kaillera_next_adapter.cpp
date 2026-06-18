@@ -59,6 +59,20 @@ u32 env_u32(const char *name, u32 fallback)
 	return u32(parsed);
 }
 
+bool parse_u32(const char *value, u32 &out)
+{
+	if (!value || !value[0])
+		return false;
+
+	char *end = nullptr;
+	unsigned long parsed = std::strtoul(value, &end, 10);
+	if ((end && *end) || parsed > 0xffffffffUL)
+		return false;
+
+	out = u32(parsed);
+	return true;
+}
+
 bool env_enabled(const char *name)
 {
 	const char *value = std::getenv(name);
@@ -299,6 +313,61 @@ static void build_input_map(kaillera_next_adapter::impl &adapter)
 	adapter.input_map_built = true;
 	if (adapter.trace)
 		osd_printf_info("Kaillera Next trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
+	if (env_enabled("KN_MAME_DUMP_INPUT_MAP"))
+	{
+		for (mapped_input_field const &mapped : adapter.input_map)
+		{
+			std::string const name = mapped.field->name();
+			osd_printf_info(
+					"Kaillera Next input map: player=%u byte=%u bit=%02x type=%u name=%s\n",
+					mapped.player,
+					mapped.byte,
+					mapped.bit,
+					u32(mapped.field->type()),
+					name.c_str());
+		}
+	}
+}
+
+static u32 required_input_size(kaillera_next_adapter::impl &adapter)
+{
+	build_input_map(adapter);
+
+	u32 bytes = 1;
+	for (mapped_input_field const &mapped : adapter.input_map)
+		bytes = std::max<u32>(bytes, mapped.byte + 1);
+	return bytes;
+}
+
+static bool input_size_env_is_auto()
+{
+	const char *value = std::getenv("KN_INPUT_SIZE");
+	return !value || !value[0] || std::strcmp(value, "auto") == 0;
+}
+
+static u32 resolve_input_size(kaillera_next_adapter::impl &adapter)
+{
+	u32 const required = required_input_size(adapter);
+	const char *value = std::getenv("KN_INPUT_SIZE");
+	if (input_size_env_is_auto())
+	{
+		if (adapter.trace || env_enabled("KN_MAME_DUMP_INPUT_MAP"))
+			osd_printf_info("Kaillera Next: auto input_size=%u from mapped ioports\n", required);
+		return required;
+	}
+
+	u32 requested = 0;
+	if (!parse_u32(value, requested) || requested == 0)
+	{
+		osd_printf_error("Kaillera Next: invalid KN_INPUT_SIZE=%s; using auto input_size=%u\n", value, required);
+		return required;
+	}
+	if (requested < required)
+	{
+		osd_printf_error("Kaillera Next: KN_INPUT_SIZE=%u is smaller than mapped ioports require %u; raising input_size\n", requested, required);
+		return required;
+	}
+	return requested;
 }
 
 static void sync_programmatic_inputs(kaillera_next_adapter::impl &adapter)
@@ -610,14 +679,14 @@ bool kaillera_next_adapter::initialize()
 	m_impl->networked = server[0] != 0;
 	const char *session = env_value("KN_SESSION", "mame-bublbobl");
 	u32 default_players = server[0] ? 2 : 1;
-	u32 input_size = env_u32("KN_INPUT_SIZE", 1);
 	u32 player_id = env_u32("KN_PLAYER_ID", 0);
 	u32 player_count = env_u32("KN_PLAYERS", default_players);
 
 	m_impl->player_id = player_id;
 	m_impl->player_count = player_count;
-	m_impl->input_size = input_size;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
+	u32 input_size = resolve_input_size(*m_impl);
+	m_impl->input_size = input_size;
 
 	KnCallbacks callbacks = {};
 	callbacks.user = m_impl.get();
@@ -635,7 +704,7 @@ bool kaillera_next_adapter::initialize()
 	config.session_name = session;
 	config.player_id = player_id;
 	config.player_count = player_count;
-	config.input_size = input_size;
+	config.input_size = input_size_env_is_auto() ? 0 : input_size;
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
 	config.max_prediction_frames = env_u32("KN_MAX_PREDICTION", server[0] ? 20 : 0);
@@ -657,7 +726,7 @@ bool kaillera_next_adapter::initialize()
 			session,
 			config.player_id,
 			config.player_count,
-			config.input_size,
+			input_size,
 			library_path);
 	return true;
 }
