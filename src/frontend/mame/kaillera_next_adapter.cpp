@@ -6,10 +6,10 @@
 #include "../../../../../sdk/kaillera_next.h"
 
 #include "osdepend.h"
+#include "ui/uimain.h"
 #include <dlfcn.h>
 
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -17,6 +17,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+extern bool g_kn_mame_hide_replay_video;
 
 namespace {
 
@@ -35,6 +37,7 @@ constexpr u8 KN_INPUT_COIN = 0x10;
 constexpr u8 KN_INPUT_START = 0x20;
 constexpr u8 KN_INPUT_BUTTON1 = 0x40;
 constexpr u8 KN_INPUT_BUTTON2 = 0x80;
+constexpr u8 KN_INPUT_BUTTON3 = 0x01;
 
 const char *env_value(const char *name, const char *fallback)
 {
@@ -134,6 +137,7 @@ struct mapped_input_field
 {
 	ioport_field *field;
 	u32 player;
+	u32 byte;
 	u8 bit;
 };
 
@@ -178,6 +182,7 @@ struct kaillera_next_adapter::impl
 	bool reported_exit = false;
 	bool in_advance = false;
 	bool networked = false;
+	bool hide_replay_video = false;
 };
 
 static void set_field(ioport_field *field, bool pressed, bool lockout = true)
@@ -190,49 +195,77 @@ static void set_field(ioport_field *field, bool pressed, bool lockout = true)
 
 static bool field_pressed(running_machine &machine, ioport_field *field)
 {
-	return field && machine.input().seq_pressed(field->seq());
+	return field &&
+			field->enabled() &&
+			!machine.ui().is_menu_active() &&
+			machine.input().seq_pressed(field->seq());
 }
 
-static u8 bit_for_field(ioport_field &field)
+static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
 {
+	byte = 0;
 	switch (field.type())
 	{
 	case IPT_JOYSTICK_UP:
 	case IPT_JOYSTICKLEFT_UP:
 	case IPT_JOYSTICKRIGHT_UP:
-		return KN_INPUT_UP;
+		bit = KN_INPUT_UP;
+		return true;
 	case IPT_JOYSTICK_LEFT:
 	case IPT_JOYSTICKLEFT_LEFT:
 	case IPT_JOYSTICKRIGHT_LEFT:
-		return KN_INPUT_LEFT;
+		bit = KN_INPUT_LEFT;
+		return true;
 	case IPT_JOYSTICK_RIGHT:
 	case IPT_JOYSTICKLEFT_RIGHT:
 	case IPT_JOYSTICKRIGHT_RIGHT:
-		return KN_INPUT_RIGHT;
+		bit = KN_INPUT_RIGHT;
+		return true;
 	case IPT_JOYSTICK_DOWN:
 	case IPT_JOYSTICKLEFT_DOWN:
 	case IPT_JOYSTICKRIGHT_DOWN:
-		return KN_INPUT_DOWN;
+		bit = KN_INPUT_DOWN;
+		return true;
 	case IPT_START:
 	case IPT_SELECT:
-		return field.type() == IPT_START ? KN_INPUT_START : KN_INPUT_COIN;
+		bit = field.type() == IPT_START ? KN_INPUT_START : KN_INPUT_COIN;
+		return true;
 	default:
 		break;
 	}
 
 	if (field.type() >= IPT_COIN1 && field.type() <= IPT_COIN12)
-		return KN_INPUT_COIN;
+	{
+		bit = KN_INPUT_COIN;
+		return true;
+	}
 	if (field.type() >= IPT_START1 && field.type() <= IPT_START10)
-		return KN_INPUT_START;
+	{
+		bit = KN_INPUT_START;
+		return true;
+	}
 	if (field.type() >= IPT_BUTTON1 && field.type() <= IPT_BUTTON16)
 	{
 		u32 const button = u32(field.type()) - u32(IPT_BUTTON1);
 		if (button == 0)
-			return KN_INPUT_BUTTON1;
+		{
+			bit = KN_INPUT_BUTTON1;
+			return true;
+		}
 		if (button == 1)
-			return KN_INPUT_BUTTON2;
+		{
+			bit = KN_INPUT_BUTTON2;
+			return true;
+		}
+		if (button < 10)
+		{
+			byte = 1;
+			bit = KN_INPUT_BUTTON3 << (button - 2);
+			return true;
+		}
 	}
-	return 0;
+	bit = 0;
+	return false;
 }
 
 static u32 player_for_field(ioport_field &field)
@@ -253,12 +286,13 @@ static void build_input_map(kaillera_next_adapter::impl &adapter)
 	{
 		for (ioport_field &field : port.second->fields())
 		{
-			u8 bit = bit_for_field(field);
-			if (!bit)
+			u32 byte = 0;
+			u8 bit = 0;
+			if (!field_mapping(field, byte, bit))
 				continue;
 			if (field.is_analog())
 				continue;
-			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), bit});
+			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit});
 		}
 	}
 
@@ -298,19 +332,39 @@ static u8 read_default_keyboard(running_machine &machine)
 	return input;
 }
 
-static u8 read_local_input(kaillera_next_adapter::impl &adapter)
+static void set_input_bit(u8 *bytes, u32 len, u32 byte, u8 bit)
+{
+	if (bytes && byte < len)
+		bytes[byte] |= bit;
+}
+
+static void read_default_keyboard(running_machine &machine, u8 *bytes, u32 len)
+{
+	if (bytes && len > 0)
+		bytes[0] |= read_default_keyboard(machine);
+}
+
+static void read_local_input(kaillera_next_adapter::impl &adapter, u8 *bytes, u32 len)
 {
 	build_input_map(adapter);
 
-	u8 input = 0;
 	u32 const source_player = env_u32("KN_MAME_LOCAL_CONTROL_PLAYER", 0);
 	for (mapped_input_field &mapped : adapter.input_map)
 	{
 		if (mapped.player == source_player && field_pressed(adapter.machine, mapped.field))
-			input |= mapped.bit;
+			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
-	input |= read_default_keyboard(adapter.machine);
-	return input;
+	if (env_enabled("KN_MAME_DEFAULT_KEYS"))
+		read_default_keyboard(adapter.machine, bytes, len);
+}
+
+static bool mapped_input_pressed(const KnInput *players, u32 player_count, mapped_input_field const &mapped)
+{
+	if (!players || mapped.player >= player_count)
+		return false;
+
+	KnInput const &input = players[mapped.player];
+	return input.bytes && mapped.byte < input.len && (input.bytes[mapped.byte] & mapped.bit);
 }
 
 static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnInput *players, u32 player_count)
@@ -344,18 +398,8 @@ static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnIn
 
 	if (apply_to_mame)
 	{
-		std::array<u8, 2> inputs = {};
-		for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
-		{
-			if (players && players[player].bytes && players[player].len > 0)
-				inputs[player] = players[player].bytes[0];
-		}
-
 		for (mapped_input_field &mapped : adapter.input_map)
-		{
-			u8 input = mapped.player < inputs.size() ? inputs[mapped.player] : 0;
-			set_field(mapped.field, input & mapped.bit);
-		}
+			set_field(mapped.field, mapped_input_pressed(players, player_count, mapped));
 		sync_programmatic_inputs(adapter);
 	}
 	adapter.injected_frame_count++;
@@ -371,10 +415,10 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	out_input->len = std::min<u32>(out_input->cap, adapter->input_size);
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
-		u8 input = read_local_input(*adapter) | scripted_start_input(input_frame, adapter->player_id);
-		if (adapter->trace && input != adapter->last_local_input)
-			osd_printf_info("Kaillera Next trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, input);
-		out_input->bytes[0] = input;
+		read_local_input(*adapter, out_input->bytes, out_input->len);
+		out_input->bytes[0] |= scripted_start_input(input_frame, adapter->player_id);
+		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
+			osd_printf_info("Kaillera Next trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
@@ -431,6 +475,7 @@ static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 		return KN_ERR_CALLBACK;
 
 	adapter->load_count++;
+	adapter->hide_replay_video = true;
 	if (adapter->trace)
 		osd_printf_info("Kaillera Next trace: load_state done frame=%u load_count=%u\n", frame, adapter->load_count);
 	return KN_OK;
@@ -465,6 +510,9 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	apply_mapped_inputs(*adapter, players, player_count);
 
 	adapter->in_advance = true;
+	bool const hide_video = adapter->hide_replay_video;
+	if (hide_video)
+		g_kn_mame_hide_replay_video = true;
 	u32 target_frame = adapter->frame_count + 1;
 	u32 guard = 0;
 	u32 guard_limit = env_u32("KN_MAME_ADVANCE_GUARD", 1000000);
@@ -476,10 +524,14 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 			if (adapter->trace)
 				osd_printf_info("Kaillera Next trace: advance_frame guard exhausted frame=%u current_mame_frames=%u target_mame_frames=%u guard=%u\n",
 						frame, adapter->frame_count, target_frame, guard);
+			if (hide_video)
+				g_kn_mame_hide_replay_video = false;
 			adapter->in_advance = false;
 			return KN_ERR_CALLBACK;
 		}
 	}
+	if (hide_video)
+		g_kn_mame_hide_replay_video = false;
 	adapter->in_advance = false;
 	adapter->advance_count++;
 	if (adapter->trace && adapter->load_count > 0)
@@ -617,7 +669,9 @@ bool kaillera_next_adapter::tick()
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
 
+	m_impl->hide_replay_video = false;
 	KnResult result = m_impl->kn_client_tick(m_impl->client);
+	m_impl->hide_replay_video = false;
 	if (result != KN_OK)
 	{
 		osd_printf_error("Kaillera Next: tick failed result=%d\n", int(result));

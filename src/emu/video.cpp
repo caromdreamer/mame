@@ -42,6 +42,8 @@
 //  GLOBAL VARIABLES
 //**************************************************************************
 
+bool g_kn_mame_hide_replay_video = false;
+
 // frameskipping tables
 const bool video_manager::s_skiptable[FRAMESKIP_LEVELS][FRAMESKIP_LEVELS] =
 {
@@ -214,6 +216,14 @@ void video_manager::frame_update(bool from_debugger)
 {
 	// only render sound and video if we're in the running phase
 	machine_phase const phase = machine().phase();
+	if (g_kn_mame_hide_replay_video && !from_debugger)
+	{
+		if (phase > machine_phase::INIT)
+			update_frameskip();
+		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		return;
+	}
+
 	bool skipped_it = m_skipping_this_frame;
 	bool const update_screens = (phase == machine_phase::RUNNING) && (!machine().paused() || machine().options().update_in_pause());
 	bool anything_changed = update_screens && finish_screen_updates();

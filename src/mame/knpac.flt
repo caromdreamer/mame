@@ -1,3 +1,6 @@
+capcom/cps1.cpp
+capcom/cps1_v.cpp
+capcom/cps2.cpp
 pacman/jrpacman.cpp
 pacman/pacman.cpp
 pacman/pengo.cpp
