@@ -796,33 +796,10 @@ void kaillera_next_adapter::on_exit()
 	if (!m_impl->initialized || !m_impl->client || m_impl->reported_exit)
 		return;
 
-	KnMetrics metrics = {};
-	if (m_impl->networked)
-	{
-		u32 max_polls = env_u32("KN_SETTLE_POLLS", 1000);
-		for (u32 poll = 0; poll < max_polls; poll++)
-		{
-			if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) != KN_OK)
-				break;
-			if (metrics.confirmed_frame_count >= metrics.current_frame)
-			{
-				if (m_impl->trace)
-					osd_printf_info("Kaillera Next trace: settle complete poll=%u confirmed=%u current=%u\n", poll, metrics.confirmed_frame_count, metrics.current_frame);
-				break;
-			}
-			KnResult poll_result = m_impl->kn_client_poll_network(m_impl->client);
-			if (poll_result != KN_OK)
-			{
-				if (m_impl->trace)
-					osd_printf_info("Kaillera Next trace: settle poll failed poll=%u result=%d confirmed=%u current=%u\n", poll, int(poll_result), metrics.confirmed_frame_count, metrics.current_frame);
-				break;
-			}
-			if (m_impl->trace && (poll % 100) == 0)
-				osd_printf_info("Kaillera Next trace: settle poll=%u confirmed=%u current=%u\n", poll, metrics.confirmed_frame_count, metrics.current_frame);
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-	}
+	m_impl->kn_client_leave(m_impl->client);
+	m_impl->reported_exit = true;
 
+	KnMetrics metrics = {};
 	if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
 	{
 		osd_printf_info(
@@ -844,7 +821,4 @@ void kaillera_next_adapter::on_exit()
 				metrics.confirmed_missing_frames,
 				metrics.confirmed_nack_sent);
 	}
-
-	m_impl->kn_client_leave(m_impl->client);
-	m_impl->reported_exit = true;
 }
