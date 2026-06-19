@@ -241,27 +241,38 @@ struct kaillera_next_adapter::impl
 	bool networked = false;
 	bool spectator = false;
 	bool original_throttled = true;
-	bool catchup_fastforward = false;
+	u32 original_speed_factor = 1000;
+	bool catchup_playback = false;
 	bool hide_replay_video = false;
 };
 
-static void set_catchup_fastforward(kaillera_next_adapter::impl &adapter, bool enabled)
+static u32 catchup_speed_factor()
 {
-	if (!adapter.spectator || adapter.catchup_fastforward == enabled)
+	u32 speed_percent = env_u32("KN_SPECTATOR_CATCHUP_SPEED_PERCENT", 400);
+	speed_percent = std::clamp<u32>(speed_percent, 100, 1000);
+	return speed_percent * 10;
+}
+
+static void set_catchup_playback(kaillera_next_adapter::impl &adapter, bool enabled)
+{
+	if (!adapter.spectator || adapter.catchup_playback == enabled)
 		return;
 
 	if (enabled)
 	{
 		adapter.original_throttled = adapter.machine.video().throttled();
-		adapter.machine.video().set_fastforward(true);
-		adapter.machine.video().set_throttled(false);
+		adapter.original_speed_factor = adapter.machine.video().speed_factor();
+		adapter.machine.video().set_fastforward(false);
+		adapter.machine.video().set_throttled(true);
+		adapter.machine.video().set_speed_factor(catchup_speed_factor());
 	}
 	else
 	{
 		adapter.machine.video().set_fastforward(false);
 		adapter.machine.video().set_throttled(adapter.original_throttled);
+		adapter.machine.video().set_speed_factor(adapter.original_speed_factor);
 	}
-	adapter.catchup_fastforward = enabled;
+	adapter.catchup_playback = enabled;
 }
 
 static void set_field(ioport_field *field, bool pressed, bool lockout = true)
@@ -803,7 +814,7 @@ bool kaillera_next_adapter::tick()
 		bool const catchup_before = !had_before_metrics ||
 				before_metrics.current_frame == 0 ||
 				before_metrics.spectator_buffered_frames > catchup_buffer;
-		set_catchup_fastforward(*m_impl, catchup_before);
+		set_catchup_playback(*m_impl, catchup_before);
 	}
 	m_impl->hide_replay_video = false;
 	KnResult result = m_impl->kn_client_tick(m_impl->client);
@@ -819,7 +830,7 @@ bool kaillera_next_adapter::tick()
 		if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
 		{
 			if (m_impl->spectator)
-				set_catchup_fastforward(*m_impl, metrics.spectator_buffered_frames > catchup_buffer);
+				set_catchup_playback(*m_impl, metrics.spectator_buffered_frames > catchup_buffer);
 			u32 frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
 			if (metrics.current_frame == 0 ||
 					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
@@ -841,12 +852,12 @@ bool kaillera_next_adapter::tick()
 		}
 		else if (m_impl->spectator)
 		{
-			set_catchup_fastforward(*m_impl, false);
+			set_catchup_playback(*m_impl, false);
 		}
 	}
 	else if (m_impl->spectator)
 	{
-		set_catchup_fastforward(*m_impl, false);
+		set_catchup_playback(*m_impl, false);
 	}
 	return true;
 }
@@ -861,7 +872,7 @@ void kaillera_next_adapter::on_exit()
 	if (!m_impl->initialized || !m_impl->client || m_impl->reported_exit)
 		return;
 
-	set_catchup_fastforward(*m_impl, false);
+	set_catchup_playback(*m_impl, false);
 	m_impl->kn_client_leave(m_impl->client);
 	m_impl->reported_exit = true;
 
