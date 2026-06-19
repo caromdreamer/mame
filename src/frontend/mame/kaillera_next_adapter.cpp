@@ -29,15 +29,19 @@ using kn_client_poll_network_fn = KnResult (*)(KnClient *);
 using kn_client_get_metrics_fn = KnResult (*)(KnClient *, KnMetrics *);
 using kn_client_leave_fn = void (*)(KnClient *);
 
-constexpr u8 KN_INPUT_UP = 0x01;
-constexpr u8 KN_INPUT_LEFT = 0x02;
-constexpr u8 KN_INPUT_RIGHT = 0x04;
-constexpr u8 KN_INPUT_DOWN = 0x08;
-constexpr u8 KN_INPUT_COIN = 0x10;
-constexpr u8 KN_INPUT_START = 0x20;
-constexpr u8 KN_INPUT_BUTTON1 = 0x40;
-constexpr u8 KN_INPUT_BUTTON2 = 0x80;
-constexpr u8 KN_INPUT_BUTTON3 = 0x01;
+// Common digital profile, matching the old Kaillera play-value order for the
+// first 15 bits. Later slots are deterministic Kaillera Next extensions.
+constexpr u32 KN_SLOT_BUTTON_BASE = 0;
+constexpr u32 KN_SLOT_UP = 7;
+constexpr u32 KN_SLOT_DOWN = 8;
+constexpr u32 KN_SLOT_LEFT = 9;
+constexpr u32 KN_SLOT_RIGHT = 10;
+constexpr u32 KN_SLOT_COIN = 11;
+constexpr u32 KN_SLOT_START = 12;
+constexpr u32 KN_SLOT_SERVICE_MODE = 13;
+constexpr u32 KN_SLOT_SERVICE1 = 14;
+constexpr u32 KN_SLOT_BUTTON_EXTENSION_BASE = 16;
+constexpr u32 KN_SLOT_SERVICE_EXTENSION_BASE = KN_SLOT_BUTTON_EXTENSION_BASE + 9;
 
 const char *env_value(const char *name, const char *fallback)
 {
@@ -79,21 +83,40 @@ bool env_enabled(const char *name)
 	return value && value[0] && std::strcmp(value, "0");
 }
 
-u8 scripted_pacman_input(u32 frame, u32 player)
+static void input_slot(u32 slot, u32 &byte, u8 &bit)
 {
-	u8 input = 0;
+	byte = slot / 8;
+	bit = u8(1U << (slot % 8));
+}
+
+static void set_input_slot(u8 *bytes, u32 len, u32 slot)
+{
+	u32 byte = 0;
+	u8 bit = 0;
+	input_slot(slot, byte, bit);
+	if (bytes && byte < len)
+		bytes[byte] |= bit;
+}
+
+static u32 button_slot(u32 button)
+{
+	return button < 7 ? KN_SLOT_BUTTON_BASE + button : KN_SLOT_BUTTON_EXTENSION_BASE + (button - 7);
+}
+
+static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
+{
 	if (env_enabled("KN_MAME_SCRIPT_START"))
 	{
 		if (player == 0)
 		{
 			if (frame < 30)
-				input |= KN_INPUT_COIN;
+				set_input_slot(bytes, len, KN_SLOT_COIN);
 			if (frame >= 45 && frame < 75)
-				input |= KN_INPUT_START;
+				set_input_slot(bytes, len, KN_SLOT_START);
 		}
 		else if (player == 1 && frame >= 75 && frame < 105)
 		{
-			input |= KN_INPUT_START;
+			set_input_slot(bytes, len, KN_SLOT_START);
 		}
 	}
 
@@ -101,27 +124,32 @@ u8 scripted_pacman_input(u32 frame, u32 player)
 	switch (phase)
 	{
 	case 0:
-		return input | KN_INPUT_RIGHT | KN_INPUT_BUTTON1;
+		set_input_slot(bytes, len, KN_SLOT_RIGHT);
+		set_input_slot(bytes, len, button_slot(0));
+		break;
 	case 1:
-		return input | KN_INPUT_DOWN | KN_INPUT_BUTTON2;
+		set_input_slot(bytes, len, KN_SLOT_DOWN);
+		set_input_slot(bytes, len, button_slot(1));
+		break;
 	case 2:
-		return input | KN_INPUT_LEFT | KN_INPUT_BUTTON1;
+		set_input_slot(bytes, len, KN_SLOT_LEFT);
+		set_input_slot(bytes, len, button_slot(0));
+		break;
 	default:
-		return input | KN_INPUT_UP;
+		set_input_slot(bytes, len, KN_SLOT_UP);
+		break;
 	}
 }
 
-u8 scripted_start_input(u32 frame, u32 player)
+static void scripted_start_input(u8 *bytes, u32 len, u32 frame, u32 player)
 {
 	if (!env_enabled("KN_MAME_AUTO_START") || player != 0)
-		return 0;
+		return;
 
-	u8 input = 0;
 	if (frame >= 30 && frame < 45)
-		input |= KN_INPUT_COIN;
+		set_input_slot(bytes, len, KN_SLOT_COIN);
 	if (frame >= 75 && frame < 90)
-		input |= KN_INPUT_START;
-	return input;
+		set_input_slot(bytes, len, KN_SLOT_START);
 }
 
 u64 fnv1a64(const u8 *bytes, std::size_t len)
@@ -153,6 +181,7 @@ struct mapped_input_field
 	u32 player;
 	u32 byte;
 	u8 bit;
+	bool owner_only;
 };
 
 } // namespace
@@ -217,32 +246,31 @@ static bool field_pressed(running_machine &machine, ioport_field *field)
 
 static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
 {
-	byte = 0;
 	switch (field.type())
 	{
 	case IPT_JOYSTICK_UP:
 	case IPT_JOYSTICKLEFT_UP:
 	case IPT_JOYSTICKRIGHT_UP:
-		bit = KN_INPUT_UP;
+		input_slot(KN_SLOT_UP, byte, bit);
 		return true;
 	case IPT_JOYSTICK_LEFT:
 	case IPT_JOYSTICKLEFT_LEFT:
 	case IPT_JOYSTICKRIGHT_LEFT:
-		bit = KN_INPUT_LEFT;
+		input_slot(KN_SLOT_LEFT, byte, bit);
 		return true;
 	case IPT_JOYSTICK_RIGHT:
 	case IPT_JOYSTICKLEFT_RIGHT:
 	case IPT_JOYSTICKRIGHT_RIGHT:
-		bit = KN_INPUT_RIGHT;
+		input_slot(KN_SLOT_RIGHT, byte, bit);
 		return true;
 	case IPT_JOYSTICK_DOWN:
 	case IPT_JOYSTICKLEFT_DOWN:
 	case IPT_JOYSTICKRIGHT_DOWN:
-		bit = KN_INPUT_DOWN;
+		input_slot(KN_SLOT_DOWN, byte, bit);
 		return true;
 	case IPT_START:
 	case IPT_SELECT:
-		bit = field.type() == IPT_START ? KN_INPUT_START : KN_INPUT_COIN;
+		input_slot(field.type() == IPT_START ? KN_SLOT_START : KN_SLOT_COIN, byte, bit);
 		return true;
 	default:
 		break;
@@ -250,36 +278,39 @@ static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
 
 	if (field.type() >= IPT_COIN1 && field.type() <= IPT_COIN12)
 	{
-		bit = KN_INPUT_COIN;
+		input_slot(KN_SLOT_COIN, byte, bit);
 		return true;
 	}
 	if (field.type() >= IPT_START1 && field.type() <= IPT_START10)
 	{
-		bit = KN_INPUT_START;
+		input_slot(KN_SLOT_START, byte, bit);
+		return true;
+	}
+	if (field.type() >= IPT_SERVICE1 && field.type() <= IPT_SERVICE4)
+	{
+		u32 const service = u32(field.type()) - u32(IPT_SERVICE1);
+		input_slot(service == 0 ? KN_SLOT_SERVICE1 : KN_SLOT_SERVICE_EXTENSION_BASE + (service - 1), byte, bit);
+		return true;
+	}
+	if (field.type() == IPT_SERVICE)
+	{
+		input_slot(KN_SLOT_SERVICE_MODE, byte, bit);
 		return true;
 	}
 	if (field.type() >= IPT_BUTTON1 && field.type() <= IPT_BUTTON16)
 	{
 		u32 const button = u32(field.type()) - u32(IPT_BUTTON1);
-		if (button == 0)
-		{
-			bit = KN_INPUT_BUTTON1;
-			return true;
-		}
-		if (button == 1)
-		{
-			bit = KN_INPUT_BUTTON2;
-			return true;
-		}
-		if (button < 10)
-		{
-			byte = 1;
-			bit = KN_INPUT_BUTTON3 << (button - 2);
-			return true;
-		}
+		input_slot(button_slot(button), byte, bit);
+		return true;
 	}
 	bit = 0;
 	return false;
+}
+
+static bool owner_only_input_field(ioport_field &field)
+{
+	return (field.type() >= IPT_SERVICE1 && field.type() <= IPT_SERVICE4) ||
+			field.type() == IPT_SERVICE;
 }
 
 static u32 player_for_field(ioport_field &field)
@@ -288,6 +319,10 @@ static u32 player_for_field(ioport_field &field)
 		return u32(field.type()) - u32(IPT_START1);
 	if (field.type() >= IPT_COIN1 && field.type() <= IPT_COIN12)
 		return u32(field.type()) - u32(IPT_COIN1);
+	if (field.type() >= IPT_SERVICE1 && field.type() <= IPT_SERVICE4)
+		return 0;
+	if (field.type() == IPT_SERVICE)
+		return 0;
 	return field.player();
 }
 
@@ -306,7 +341,7 @@ static void build_input_map(kaillera_next_adapter::impl &adapter)
 				continue;
 			if (field.is_analog())
 				continue;
-			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit});
+			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field)});
 		}
 	}
 
@@ -389,18 +424,29 @@ static void read_local_input(kaillera_next_adapter::impl &adapter, u8 *bytes, u3
 	u32 const source_player = env_u32("KN_MAME_LOCAL_CONTROL_PLAYER", 0);
 	for (mapped_input_field &mapped : adapter.input_map)
 	{
-		if (mapped.player == source_player && field_pressed(adapter.machine, mapped.field))
+		if (mapped.owner_only && adapter.player_id != 0)
+			continue;
+		if ((mapped.owner_only || mapped.player == source_player) && field_pressed(adapter.machine, mapped.field))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
 }
 
+static bool input_bit_pressed(KnInput const &input, mapped_input_field const &mapped)
+{
+	return input.bytes && mapped.byte < input.len && (input.bytes[mapped.byte] & mapped.bit);
+}
+
 static bool mapped_input_pressed(const KnInput *players, u32 player_count, mapped_input_field const &mapped)
 {
-	if (!players || mapped.player >= player_count)
+	if (!players)
 		return false;
 
-	KnInput const &input = players[mapped.player];
-	return input.bytes && mapped.byte < input.len && (input.bytes[mapped.byte] & mapped.bit);
+	if (mapped.owner_only)
+	{
+		return player_count > 0 && input_bit_pressed(players[0], mapped);
+	}
+
+	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
 }
 
 static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnInput *players, u32 player_count)
@@ -452,14 +498,14 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
 		read_local_input(*adapter, out_input->bytes, out_input->len);
-		out_input->bytes[0] |= scripted_start_input(input_frame, adapter->player_id);
+		scripted_start_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
 			osd_printf_info("Kaillera Next trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
 	{
-		out_input->bytes[0] = scripted_pacman_input(input_frame, adapter->player_id);
+		scripted_digital_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
 		adapter->last_local_input = out_input->bytes[0];
 	}
 	return KN_OK;
