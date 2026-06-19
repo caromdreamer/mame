@@ -27,7 +27,6 @@ using kn_client_destroy_fn = void (*)(KnClient *);
 using kn_client_tick_fn = KnResult (*)(KnClient *);
 using kn_client_poll_network_fn = KnResult (*)(KnClient *);
 using kn_client_get_metrics_fn = KnResult (*)(KnClient *, KnMetrics *);
-using kn_client_get_playback_control_fn = KnResult (*)(KnClient *, KnPlaybackControl *);
 using kn_client_leave_fn = void (*)(KnClient *);
 
 // Common digital profile, matching the old Kaillera play-value order for the
@@ -216,7 +215,6 @@ struct kaillera_next_adapter::impl
 	kn_client_tick_fn kn_client_tick = nullptr;
 	kn_client_poll_network_fn kn_client_poll_network = nullptr;
 	kn_client_get_metrics_fn kn_client_get_metrics = nullptr;
-	kn_client_get_playback_control_fn kn_client_get_playback_control = nullptr;
 	kn_client_leave_fn kn_client_leave = nullptr;
 	std::unordered_map<u32, std::vector<u8>> snapshots;
 	u32 player_id = 0;
@@ -244,8 +242,8 @@ struct kaillera_next_adapter::impl
 	bool spectator = false;
 	bool original_throttled = true;
 	u32 original_speed_factor = 1000;
-	u32 catchup_speed_factor = 1000;
-	bool catchup_playback = false;
+	u32 sdk_playback_speed_factor = 1000;
+	bool sdk_playback_override = false;
 	bool hide_replay_video = false;
 };
 
@@ -254,11 +252,13 @@ static void apply_playback_control(kaillera_next_adapter::impl &adapter, const K
 	if (!adapter.spectator)
 		return;
 
-	bool const enabled = control.phase == KN_PLAYBACK_CATCHING_UP && control.target_speed_percent > 100;
-	u32 const speed_factor = std::clamp<u32>(control.target_speed_percent, 100, 1000) * 10;
+	u32 speed_percent = control.target_speed_percent ? control.target_speed_percent : 100;
+	speed_percent = std::clamp<u32>(speed_percent, 100, 1000);
+	u32 const speed_factor = speed_percent * 10;
+	bool const enabled = speed_factor != 1000;
 	if (enabled)
 	{
-		if (!adapter.catchup_playback)
+		if (!adapter.sdk_playback_override)
 		{
 			adapter.original_throttled = adapter.machine.video().throttled();
 			adapter.original_speed_factor = adapter.machine.video().speed_factor();
@@ -266,16 +266,16 @@ static void apply_playback_control(kaillera_next_adapter::impl &adapter, const K
 		adapter.machine.video().set_fastforward(false);
 		adapter.machine.video().set_throttled(true);
 		adapter.machine.video().set_speed_factor(speed_factor);
-		adapter.catchup_speed_factor = speed_factor;
+		adapter.sdk_playback_speed_factor = speed_factor;
 	}
-	else if (adapter.catchup_playback)
+	else if (adapter.sdk_playback_override)
 	{
 		adapter.machine.video().set_fastforward(false);
 		adapter.machine.video().set_throttled(adapter.original_throttled);
 		adapter.machine.video().set_speed_factor(adapter.original_speed_factor);
-		adapter.catchup_speed_factor = adapter.original_speed_factor;
+		adapter.sdk_playback_speed_factor = adapter.original_speed_factor;
 	}
-	adapter.catchup_playback = enabled;
+	adapter.sdk_playback_override = enabled;
 }
 
 static void set_field(ioport_field *field, bool pressed, bool lockout = true)
@@ -741,7 +741,6 @@ bool kaillera_next_adapter::initialize()
 		!load_symbol(m_impl->library, "kn_client_tick", m_impl->kn_client_tick) ||
 		!load_symbol(m_impl->library, "kn_client_poll_network", m_impl->kn_client_poll_network) ||
 		!load_symbol(m_impl->library, "kn_client_get_metrics", m_impl->kn_client_get_metrics) ||
-		!load_symbol(m_impl->library, "kn_client_get_playback_control", m_impl->kn_client_get_playback_control) ||
 		!load_symbol(m_impl->library, "kn_client_leave", m_impl->kn_client_leave))
 	{
 		return false;
@@ -856,7 +855,6 @@ bool kaillera_next_adapter::tick()
 		else if (m_impl->spectator)
 		{
 			KnPlaybackControl control = {};
-			control.phase = KN_PLAYBACK_LIVE;
 			control.target_speed_percent = 100;
 			apply_playback_control(*m_impl, control);
 		}
@@ -864,7 +862,6 @@ bool kaillera_next_adapter::tick()
 	else if (m_impl->spectator)
 	{
 		KnPlaybackControl control = {};
-		control.phase = KN_PLAYBACK_LIVE;
 		control.target_speed_percent = 100;
 		apply_playback_control(*m_impl, control);
 	}
@@ -882,7 +879,6 @@ void kaillera_next_adapter::on_exit()
 		return;
 
 	KnPlaybackControl control = {};
-	control.phase = KN_PLAYBACK_LIVE;
 	control.target_speed_percent = 100;
 	apply_playback_control(*m_impl, control);
 	m_impl->kn_client_leave(m_impl->client);
