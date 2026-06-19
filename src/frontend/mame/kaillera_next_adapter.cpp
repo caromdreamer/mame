@@ -751,6 +751,9 @@ bool kaillera_next_adapter::tick()
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
 
+	KnMetrics before_metrics = {};
+	bool const had_before_metrics = m_impl->networked && m_impl->kn_client_get_metrics &&
+			m_impl->kn_client_get_metrics(m_impl->client, &before_metrics) == KN_OK;
 	m_impl->hide_replay_video = false;
 	KnResult result = m_impl->kn_client_tick(m_impl->client);
 	m_impl->hide_replay_video = false;
@@ -765,7 +768,8 @@ bool kaillera_next_adapter::tick()
 		if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
 		{
 			u32 frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
-			if (metrics.current_frame == 0)
+			if (metrics.current_frame == 0 ||
+					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
 				std::this_thread::sleep_for(std::chrono::milliseconds(frame_ms > 0 ? frame_ms : 1));
 
 			if (frame_ms > 0 && metrics.current_frame > m_impl->last_paced_frame)
