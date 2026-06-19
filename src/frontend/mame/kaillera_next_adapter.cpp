@@ -63,6 +63,20 @@ u32 env_u32(const char *name, u32 fallback)
 	return u32(parsed);
 }
 
+u64 env_u64(const char *name, u64 fallback)
+{
+	const char *value = std::getenv(name);
+	if (!value || !value[0])
+		return fallback;
+
+	char *end = nullptr;
+	unsigned long long parsed = std::strtoull(value, &end, 10);
+	if (end && *end)
+		return fallback;
+
+	return u64(parsed);
+}
+
 bool parse_u32(const char *value, u32 &out)
 {
 	if (!value || !value[0])
@@ -225,8 +239,30 @@ struct kaillera_next_adapter::impl
 	bool reported_exit = false;
 	bool in_advance = false;
 	bool networked = false;
+	bool spectator = false;
+	bool original_throttled = true;
+	bool catchup_fastforward = false;
 	bool hide_replay_video = false;
 };
+
+static void set_catchup_fastforward(kaillera_next_adapter::impl &adapter, bool enabled)
+{
+	if (!adapter.spectator || adapter.catchup_fastforward == enabled)
+		return;
+
+	if (enabled)
+	{
+		adapter.original_throttled = adapter.machine.video().throttled();
+		adapter.machine.video().set_fastforward(true);
+		adapter.machine.video().set_throttled(false);
+	}
+	else
+	{
+		adapter.machine.video().set_fastforward(false);
+		adapter.machine.video().set_throttled(adapter.original_throttled);
+	}
+	adapter.catchup_fastforward = enabled;
+}
 
 static void set_field(ioport_field *field, bool pressed, bool lockout = true)
 {
@@ -694,10 +730,14 @@ bool kaillera_next_adapter::initialize()
 	u32 default_players = server[0] ? 2 : 1;
 	u32 player_id = env_u32("KN_PLAYER_ID", 0);
 	u32 player_count = env_u32("KN_PLAYERS", default_players);
+	u64 spectator_id = env_u64("KN_SPECTATOR_ID", 0);
+	const char *lobby_url = env_value("KN_LOBBY_URL", "");
 
 	m_impl->player_id = player_id;
 	m_impl->player_count = player_count;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
+	m_impl->spectator = env_enabled("KN_SPECTATOR");
+	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
 
@@ -716,6 +756,9 @@ bool kaillera_next_adapter::initialize()
 	config.server_addr = server;
 	config.session_name = session;
 	config.player_id = player_id;
+	config.spectator = m_impl->spectator ? 1 : 0;
+	config.spectator_id = spectator_id;
+	config.lobby_url = lobby_url;
 	config.player_count = player_count;
 	config.input_size = input_size_env_is_auto() ? 0 : input_size;
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
@@ -754,6 +797,14 @@ bool kaillera_next_adapter::tick()
 	KnMetrics before_metrics = {};
 	bool const had_before_metrics = m_impl->networked && m_impl->kn_client_get_metrics &&
 			m_impl->kn_client_get_metrics(m_impl->client, &before_metrics) == KN_OK;
+	u32 catchup_buffer = env_u32("KN_SPECTATOR_CATCHUP_BUFFER", 3);
+	if (m_impl->spectator)
+	{
+		bool const catchup_before = !had_before_metrics ||
+				before_metrics.current_frame == 0 ||
+				before_metrics.spectator_buffered_frames > catchup_buffer;
+		set_catchup_fastforward(*m_impl, catchup_before);
+	}
 	m_impl->hide_replay_video = false;
 	KnResult result = m_impl->kn_client_tick(m_impl->client);
 	m_impl->hide_replay_video = false;
@@ -767,6 +818,8 @@ bool kaillera_next_adapter::tick()
 		KnMetrics metrics = {};
 		if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
 		{
+			if (m_impl->spectator)
+				set_catchup_fastforward(*m_impl, metrics.spectator_buffered_frames > catchup_buffer);
 			u32 frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
 			if (metrics.current_frame == 0 ||
 					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
@@ -786,6 +839,14 @@ bool kaillera_next_adapter::tick()
 				m_impl->last_paced_frame = metrics.current_frame;
 			}
 		}
+		else if (m_impl->spectator)
+		{
+			set_catchup_fastforward(*m_impl, false);
+		}
+	}
+	else if (m_impl->spectator)
+	{
+		set_catchup_fastforward(*m_impl, false);
 	}
 	return true;
 }
@@ -800,6 +861,7 @@ void kaillera_next_adapter::on_exit()
 	if (!m_impl->initialized || !m_impl->client || m_impl->reported_exit)
 		return;
 
+	set_catchup_fastforward(*m_impl, false);
 	m_impl->kn_client_leave(m_impl->client);
 	m_impl->reported_exit = true;
 
