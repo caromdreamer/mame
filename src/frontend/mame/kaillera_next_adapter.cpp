@@ -6,6 +6,7 @@
 #include "../../../../../sdk/kaillera_next.h"
 
 #include "osdepend.h"
+#include "screen.h"
 #include "ui/uimain.h"
 #include <dlfcn.h>
 
@@ -460,6 +461,20 @@ static u32 resolve_input_size(kaillera_next_adapter::impl &adapter)
 	return requested;
 }
 
+static u32 frame_duration_us(running_machine &machine)
+{
+	screen_device *screen = screen_device_enumerator(machine.root_device()).first();
+	if (!screen)
+		return 0;
+
+	attoseconds_t const attoseconds = screen->frame_period().as_attoseconds();
+	if (attoseconds <= 0)
+		return 0;
+
+	u64 const microseconds = u64(attoseconds / ATTOSECONDS_PER_MICROSECOND);
+	return microseconds > 0xffffffffULL ? 0 : u32(microseconds);
+}
+
 static void sync_programmatic_inputs(kaillera_next_adapter::impl &adapter)
 {
 	for (auto &port : adapter.machine.ioport().ports())
@@ -800,6 +815,7 @@ bool kaillera_next_adapter::initialize()
 	m_impl->input_size = input_size;
 
 	KnCallbacks callbacks = {};
+	callbacks.struct_size = sizeof(callbacks);
 	callbacks.user = m_impl.get();
 	callbacks.poll_local_input = kn_mame_poll_local_input;
 	callbacks.save_state = kn_mame_save_state;
@@ -811,6 +827,7 @@ bool kaillera_next_adapter::initialize()
 	callbacks.set_playback_control = kn_mame_set_playback_control;
 
 	KnConfig config = {};
+	config.struct_size = sizeof(config);
 	config.api_version = KN_API_VERSION;
 	config.server_addr = server;
 	config.session_name = session;
@@ -823,6 +840,7 @@ bool kaillera_next_adapter::initialize()
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
 	config.max_prediction_frames = env_u32("KN_MAX_PREDICTION", server[0] ? 20 : 0);
+	config.frame_duration_us = frame_duration_us(m_impl->machine);
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);
