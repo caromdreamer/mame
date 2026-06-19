@@ -27,6 +27,7 @@ using kn_client_destroy_fn = void (*)(KnClient *);
 using kn_client_tick_fn = KnResult (*)(KnClient *);
 using kn_client_poll_network_fn = KnResult (*)(KnClient *);
 using kn_client_get_metrics_fn = KnResult (*)(KnClient *, KnMetrics *);
+using kn_client_get_playback_status_fn = KnResult (*)(KnClient *, KnPlaybackStatus *);
 using kn_client_leave_fn = void (*)(KnClient *);
 
 // Common digital profile, matching the old Kaillera play-value order for the
@@ -215,6 +216,7 @@ struct kaillera_next_adapter::impl
 	kn_client_tick_fn kn_client_tick = nullptr;
 	kn_client_poll_network_fn kn_client_poll_network = nullptr;
 	kn_client_get_metrics_fn kn_client_get_metrics = nullptr;
+	kn_client_get_playback_status_fn kn_client_get_playback_status = nullptr;
 	kn_client_leave_fn kn_client_leave = nullptr;
 	std::unordered_map<u32, std::vector<u8>> snapshots;
 	u32 player_id = 0;
@@ -231,7 +233,9 @@ struct kaillera_next_adapter::impl
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point next_frame_at = {};
+	std::chrono::steady_clock::time_point last_status_at = {};
 	std::vector<mapped_input_field> input_map;
+	std::string last_status_text;
 	bool warned_missing_ports = false;
 	bool input_map_built = false;
 	bool trace = false;
@@ -245,6 +249,7 @@ struct kaillera_next_adapter::impl
 	u32 sdk_playback_speed_factor = 1000;
 	bool sdk_playback_override = false;
 	bool hide_replay_video = false;
+	bool show_playback_status = false;
 };
 
 static void apply_playback_control(kaillera_next_adapter::impl &adapter, const KnPlaybackControl &control)
@@ -698,6 +703,35 @@ static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackCon
 	apply_playback_control(*adapter, *control);
 }
 
+static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
+{
+	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_client_get_playback_status)
+		return;
+
+	auto const now = std::chrono::steady_clock::now();
+	if (adapter.last_status_at.time_since_epoch().count() != 0 &&
+			now - adapter.last_status_at < std::chrono::milliseconds(750))
+		return;
+
+	KnPlaybackStatus status = {};
+	if (adapter.kn_client_get_playback_status(adapter.client, &status) != KN_OK)
+		return;
+
+	std::string const short_text = status.short_text;
+	std::string const detail_text = status.detail_text;
+	std::string const message = detail_text.empty()
+			? "Kaillera Next: " + short_text
+			: "Kaillera Next: " + short_text + "\n" + detail_text;
+
+	if (message != adapter.last_status_text ||
+			now - adapter.last_status_at >= std::chrono::milliseconds(2000))
+	{
+		adapter.machine.popmessage("%s", message.c_str());
+		adapter.last_status_text = message;
+	}
+	adapter.last_status_at = now;
+}
+
 std::unique_ptr<kaillera_next_adapter> kaillera_next_adapter::create(running_machine &machine)
 {
 	if (!env_enabled("KN_MAME"))
@@ -741,6 +775,7 @@ bool kaillera_next_adapter::initialize()
 		!load_symbol(m_impl->library, "kn_client_tick", m_impl->kn_client_tick) ||
 		!load_symbol(m_impl->library, "kn_client_poll_network", m_impl->kn_client_poll_network) ||
 		!load_symbol(m_impl->library, "kn_client_get_metrics", m_impl->kn_client_get_metrics) ||
+		!load_symbol(m_impl->library, "kn_client_get_playback_status", m_impl->kn_client_get_playback_status) ||
 		!load_symbol(m_impl->library, "kn_client_leave", m_impl->kn_client_leave))
 	{
 		return false;
@@ -759,6 +794,7 @@ bool kaillera_next_adapter::initialize()
 	m_impl->player_count = player_count;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
+	m_impl->show_playback_status = m_impl->spectator && std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
@@ -828,7 +864,11 @@ bool kaillera_next_adapter::tick()
 		osd_printf_error("Kaillera Next: tick failed result=%d\n", int(result));
 		m_impl->machine.schedule_exit();
 	}
-	else if (m_impl->networked)
+	else
+	{
+		update_playback_status_overlay(*m_impl);
+	}
+	if (result == KN_OK && m_impl->networked)
 	{
 		KnMetrics metrics = {};
 		if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
