@@ -23,13 +23,15 @@ extern bool g_kn_mame_hide_replay_video;
 
 namespace {
 
-using kn_client_create_fn = KnResult (*)(const KnConfig *, const KnCallbacks *, KnClient **);
-using kn_client_destroy_fn = void (*)(KnClient *);
-using kn_client_tick_fn = KnResult (*)(KnClient *);
-using kn_client_poll_network_fn = KnResult (*)(KnClient *);
-using kn_client_get_metrics_fn = KnResult (*)(KnClient *, KnMetrics *);
-using kn_client_get_playback_status_fn = KnResult (*)(KnClient *, KnPlaybackStatus *);
-using kn_client_leave_fn = void (*)(KnClient *);
+using kn_config_init_fn = KnResult (*)(KnConfig *);
+using kn_callbacks_init_fn = KnResult (*)(KnCallbacks *, void *);
+using kn_playback_status_init_fn = KnResult (*)(KnPlaybackStatus *);
+using kn_host_session_create_fn = KnResult (*)(const KnConfig *, const KnCallbacks *, KnHostSession **);
+using kn_host_session_destroy_fn = void (*)(KnHostSession *);
+using kn_host_session_tick_fn = KnResult (*)(KnHostSession *);
+using kn_host_session_get_metrics_fn = KnResult (*)(KnHostSession *, KnMetrics *);
+using kn_host_session_get_playback_status_fn = KnResult (*)(KnHostSession *, KnPlaybackStatus *);
+using kn_host_session_leave_fn = void (*)(KnHostSession *);
 
 // Common digital profile, matching the old Kaillera play-value order for the
 // first 15 bits. Later slots are deterministic Kaillera Next extensions.
@@ -211,14 +213,16 @@ struct kaillera_next_adapter::impl
 
 	running_machine &machine;
 	void *library = nullptr;
-	KnClient *client = nullptr;
-	kn_client_create_fn kn_client_create = nullptr;
-	kn_client_destroy_fn kn_client_destroy = nullptr;
-	kn_client_tick_fn kn_client_tick = nullptr;
-	kn_client_poll_network_fn kn_client_poll_network = nullptr;
-	kn_client_get_metrics_fn kn_client_get_metrics = nullptr;
-	kn_client_get_playback_status_fn kn_client_get_playback_status = nullptr;
-	kn_client_leave_fn kn_client_leave = nullptr;
+	KnHostSession *session = nullptr;
+	kn_config_init_fn kn_config_init = nullptr;
+	kn_callbacks_init_fn kn_callbacks_init = nullptr;
+	kn_playback_status_init_fn kn_playback_status_init = nullptr;
+	kn_host_session_create_fn kn_host_session_create = nullptr;
+	kn_host_session_destroy_fn kn_host_session_destroy = nullptr;
+	kn_host_session_tick_fn kn_host_session_tick = nullptr;
+	kn_host_session_get_metrics_fn kn_host_session_get_metrics = nullptr;
+	kn_host_session_get_playback_status_fn kn_host_session_get_playback_status = nullptr;
+	kn_host_session_leave_fn kn_host_session_leave = nullptr;
 	std::unordered_map<u32, std::vector<u8>> snapshots;
 	u32 player_id = 0;
 	u32 player_count = 1;
@@ -720,7 +724,7 @@ static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackCon
 
 static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
 {
-	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_client_get_playback_status)
+	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_host_session_get_playback_status)
 		return;
 
 	auto const now = std::chrono::steady_clock::now();
@@ -729,7 +733,9 @@ static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
 		return;
 
 	KnPlaybackStatus status = {};
-	if (adapter.kn_client_get_playback_status(adapter.client, &status) != KN_OK)
+	if (adapter.kn_playback_status_init)
+		adapter.kn_playback_status_init(&status);
+	if (adapter.kn_host_session_get_playback_status(adapter.session, &status) != KN_OK)
 		return;
 
 	std::string const short_text = status.short_text;
@@ -766,9 +772,9 @@ kaillera_next_adapter::kaillera_next_adapter(running_machine &machine) :
 kaillera_next_adapter::~kaillera_next_adapter()
 {
 	on_exit();
-	if (m_impl->client && m_impl->kn_client_destroy)
-		m_impl->kn_client_destroy(m_impl->client);
-	m_impl->client = nullptr;
+	if (m_impl->session && m_impl->kn_host_session_destroy)
+		m_impl->kn_host_session_destroy(m_impl->session);
+	m_impl->session = nullptr;
 
 	if (m_impl->library)
 		dlclose(m_impl->library);
@@ -785,13 +791,15 @@ bool kaillera_next_adapter::initialize()
 		return false;
 	}
 
-	if (!load_symbol(m_impl->library, "kn_client_create", m_impl->kn_client_create) ||
-		!load_symbol(m_impl->library, "kn_client_destroy", m_impl->kn_client_destroy) ||
-		!load_symbol(m_impl->library, "kn_client_tick", m_impl->kn_client_tick) ||
-		!load_symbol(m_impl->library, "kn_client_poll_network", m_impl->kn_client_poll_network) ||
-		!load_symbol(m_impl->library, "kn_client_get_metrics", m_impl->kn_client_get_metrics) ||
-		!load_symbol(m_impl->library, "kn_client_get_playback_status", m_impl->kn_client_get_playback_status) ||
-		!load_symbol(m_impl->library, "kn_client_leave", m_impl->kn_client_leave))
+	if (!load_symbol(m_impl->library, "kn_config_init", m_impl->kn_config_init) ||
+		!load_symbol(m_impl->library, "kn_callbacks_init", m_impl->kn_callbacks_init) ||
+		!load_symbol(m_impl->library, "kn_playback_status_init", m_impl->kn_playback_status_init) ||
+		!load_symbol(m_impl->library, "kn_host_session_create", m_impl->kn_host_session_create) ||
+		!load_symbol(m_impl->library, "kn_host_session_destroy", m_impl->kn_host_session_destroy) ||
+		!load_symbol(m_impl->library, "kn_host_session_tick", m_impl->kn_host_session_tick) ||
+		!load_symbol(m_impl->library, "kn_host_session_get_metrics", m_impl->kn_host_session_get_metrics) ||
+		!load_symbol(m_impl->library, "kn_host_session_get_playback_status", m_impl->kn_host_session_get_playback_status) ||
+		!load_symbol(m_impl->library, "kn_host_session_leave", m_impl->kn_host_session_leave))
 	{
 		return false;
 	}
@@ -815,8 +823,11 @@ bool kaillera_next_adapter::initialize()
 	m_impl->input_size = input_size;
 
 	KnCallbacks callbacks = {};
-	callbacks.struct_size = sizeof(callbacks);
-	callbacks.user = m_impl.get();
+	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
+	{
+		osd_printf_error("Kaillera Next: kn_callbacks_init failed\n");
+		return false;
+	}
 	callbacks.poll_local_input = kn_mame_poll_local_input;
 	callbacks.save_state = kn_mame_save_state;
 	callbacks.load_state = kn_mame_load_state;
@@ -827,8 +838,11 @@ bool kaillera_next_adapter::initialize()
 	callbacks.set_playback_control = kn_mame_set_playback_control;
 
 	KnConfig config = {};
-	config.struct_size = sizeof(config);
-	config.api_version = KN_API_VERSION;
+	if (m_impl->kn_config_init(&config) != KN_OK)
+	{
+		osd_printf_error("Kaillera Next: kn_config_init failed\n");
+		return false;
+	}
 	config.server_addr = server;
 	config.session_name = session;
 	config.player_id = player_id;
@@ -845,10 +859,10 @@ bool kaillera_next_adapter::initialize()
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);
 
-	KnResult result = m_impl->kn_client_create(&config, &callbacks, &m_impl->client);
+	KnResult result = m_impl->kn_host_session_create(&config, &callbacks, &m_impl->session);
 	if (result != KN_OK)
 	{
-		osd_printf_error("Kaillera Next: kn_client_create failed result=%d\n", int(result));
+		osd_printf_error("Kaillera Next: kn_host_session_create failed result=%d\n", int(result));
 		return false;
 	}
 
@@ -866,16 +880,16 @@ bool kaillera_next_adapter::initialize()
 
 bool kaillera_next_adapter::tick()
 {
-	if (!m_impl->initialized || !m_impl->client)
+	if (!m_impl->initialized || !m_impl->session)
 		return false;
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
 
 	KnMetrics before_metrics = {};
-	bool const had_before_metrics = m_impl->networked && m_impl->kn_client_get_metrics &&
-			m_impl->kn_client_get_metrics(m_impl->client, &before_metrics) == KN_OK;
+	bool const had_before_metrics = m_impl->networked && m_impl->kn_host_session_get_metrics &&
+			m_impl->kn_host_session_get_metrics(m_impl->session, &before_metrics) == KN_OK;
 	m_impl->hide_replay_video = false;
-	KnResult result = m_impl->kn_client_tick(m_impl->client);
+	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
 	m_impl->hide_replay_video = false;
 	if (result != KN_OK)
 	{
@@ -889,7 +903,7 @@ bool kaillera_next_adapter::tick()
 	if (result == KN_OK && m_impl->networked)
 	{
 		KnMetrics metrics = {};
-		if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
+		if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 		{
 			u32 frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
 			if (metrics.current_frame == 0 ||
@@ -933,17 +947,17 @@ void kaillera_next_adapter::frame_done()
 
 void kaillera_next_adapter::on_exit()
 {
-	if (!m_impl->initialized || !m_impl->client || m_impl->reported_exit)
+	if (!m_impl->initialized || !m_impl->session || m_impl->reported_exit)
 		return;
 
 	KnPlaybackControl control = {};
 	control.target_speed_percent = 100;
 	apply_playback_control(*m_impl, control);
-	m_impl->kn_client_leave(m_impl->client);
+	m_impl->kn_host_session_leave(m_impl->session);
 	m_impl->reported_exit = true;
 
 	KnMetrics metrics = {};
-	if (m_impl->kn_client_get_metrics(m_impl->client, &metrics) == KN_OK)
+	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
 				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
