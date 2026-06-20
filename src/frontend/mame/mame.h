@@ -28,7 +28,7 @@ class cheat_manager;
 class inifile_manager;
 class favorite_manager;
 class mame_ui_manager;
-class kaillera_next_adapter;
+class kaileron_adapter;
 
 //**************************************************************************
 //    TYPE DEFINITIONS
@@ -60,7 +60,7 @@ public:
 	virtual void ui_initialize(running_machine& machine) override;
 
 	virtual void before_load_settings(running_machine& machine) override;
-	virtual bool kaillera_next_tick(running_machine &machine) override;
+	virtual bool kaileron_tick(running_machine &machine) override;
 
 	std::vector<std::reference_wrapper<const std::string>> missing_mandatory_images();
 
@@ -93,7 +93,7 @@ private:
 	std::unique_ptr<cheat_manager>     m_cheat;             // internal data from cheat.cpp
 	std::unique_ptr<inifile_manager>   m_inifile;           // internal data from inifile.c for INIs
 	std::unique_ptr<favorite_manager>  m_favorite;          // internal data from inifile.c for favorites
-	std::unique_ptr<kaillera_next_adapter> m_kaillera_next; // Kaillera Next rollback adapter
+	std::unique_ptr<kaileron_adapter> m_kaileron; // Kaileron rollback adapter
 
 	static mame_machine_manager *s_manager;
 };

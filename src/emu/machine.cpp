@@ -347,7 +347,7 @@ int running_machine::run(bool quiet)
 			// execute CPUs if not paused
 			if (!m_paused)
 			{
-				if (!manager().kaillera_next_tick(*this))
+				if (!manager().kaileron_tick(*this))
 					m_scheduler.timeslice();
 			}
 			// otherwise, just pump video updates and sound mapping updates through

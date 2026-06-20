@@ -20,7 +20,7 @@
 #include "clifront.h"
 #include "emuopts.h"
 #include "fileio.h"
-#include "kaillera_next_adapter.h"
+#include "kaileron_adapter.h"
 #include "luaengine.h"
 #include "mameopts.h"
 #include "pluginopts.h"
@@ -373,11 +373,11 @@ void mame_machine_manager::before_load_settings(running_machine& machine)
 
 void mame_machine_manager::create_custom(running_machine &machine)
 {
-	m_kaillera_next = kaillera_next_adapter::create(machine);
-	if (m_kaillera_next)
+	m_kaileron = kaileron_adapter::create(machine);
+	if (m_kaileron)
 	{
-		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&kaillera_next_adapter::frame_done, m_kaillera_next.get()));
-		machine.add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&kaillera_next_adapter::on_exit, m_kaillera_next.get()));
+		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&kaileron_adapter::frame_done, m_kaileron.get()));
+		machine.add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&kaileron_adapter::on_exit, m_kaileron.get()));
 	}
 
 	// start the inifile manager
@@ -415,12 +415,12 @@ void mame_machine_manager::load_cheatfiles(running_machine& machine)
 	m_cheat = std::make_unique<cheat_manager>(machine);
 }
 
-bool mame_machine_manager::kaillera_next_tick(running_machine &machine)
+bool mame_machine_manager::kaileron_tick(running_machine &machine)
 {
-	if (!m_kaillera_next)
+	if (!m_kaileron)
 		return false;
 
-	return m_kaillera_next->tick();
+	return m_kaileron->tick();
 }
 
 //-------------------------------------------------

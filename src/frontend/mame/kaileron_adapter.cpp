@@ -1,14 +1,25 @@
 // license:BSD-3-Clause
 
 #include "emu.h"
-#include "kaillera_next_adapter.h"
+#include "kaileron_adapter.h"
 
-#include "../../../../../sdk/kaillera_next.h"
+#include "kaileron.h"
 
 #include "osdepend.h"
 #include "screen.h"
 #include "ui/uimain.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -33,8 +44,14 @@ using kn_host_session_get_metrics_fn = KnResult (*)(KnHostSession *, KnMetrics *
 using kn_host_session_get_playback_status_fn = KnResult (*)(KnHostSession *, KnPlaybackStatus *);
 using kn_host_session_leave_fn = void (*)(KnHostSession *);
 
+#if defined(_WIN32)
+using sdk_library_handle = HMODULE;
+#else
+using sdk_library_handle = void *;
+#endif
+
 // Common digital profile, matching the old Kaillera play-value order for the
-// first 15 bits. Later slots are deterministic Kaillera Next extensions.
+// first 15 bits. Later slots are deterministic Kaileron extensions.
 constexpr u32 KN_SLOT_BUTTON_BASE = 0;
 constexpr u32 KN_SLOT_UP = 7;
 constexpr u32 KN_SLOT_DOWN = 8;
@@ -181,13 +198,54 @@ u64 fnv1a64(const u8 *bytes, std::size_t len)
 	return hash;
 }
 
-template <typename T>
-bool load_symbol(void *library, const char *name, T &out)
+const char *default_sdk_library_path()
 {
+#if defined(_WIN32)
+	return "kaileron.dll";
+#elif defined(__APPLE__)
+	return "target/debug/libkaileron.dylib";
+#else
+	return "target/debug/libkaileron.so";
+#endif
+}
+
+sdk_library_handle open_sdk_library(const char *path, std::string &error)
+{
+#if defined(_WIN32)
+	sdk_library_handle library = LoadLibraryA(path);
+	if (!library)
+		error = "Windows error " + std::to_string(GetLastError());
+	return library;
+#else
+	sdk_library_handle library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (!library)
+		error = dlerror();
+	return library;
+#endif
+}
+
+void close_sdk_library(sdk_library_handle library)
+{
+	if (!library)
+		return;
+#if defined(_WIN32)
+	FreeLibrary(library);
+#else
+	dlclose(library);
+#endif
+}
+
+template <typename T>
+bool load_symbol(sdk_library_handle library, const char *name, T &out)
+{
+#if defined(_WIN32)
+	out = reinterpret_cast<T>(GetProcAddress(library, name));
+#else
 	out = reinterpret_cast<T>(dlsym(library, name));
+#endif
 	if (!out)
 	{
-		osd_printf_error("Kaillera Next: missing SDK symbol %s\n", name);
+		osd_printf_error("Kaileron: missing SDK symbol %s\n", name);
 		return false;
 	}
 	return true;
@@ -204,7 +262,7 @@ struct mapped_input_field
 
 } // namespace
 
-struct kaillera_next_adapter::impl
+struct kaileron_adapter::impl
 {
 	explicit impl(running_machine &machine) :
 		machine(machine)
@@ -212,7 +270,7 @@ struct kaillera_next_adapter::impl
 	}
 
 	running_machine &machine;
-	void *library = nullptr;
+	sdk_library_handle library = nullptr;
 	KnHostSession *session = nullptr;
 	kn_config_init_fn kn_config_init = nullptr;
 	kn_callbacks_init_fn kn_callbacks_init = nullptr;
@@ -257,7 +315,7 @@ struct kaillera_next_adapter::impl
 	bool show_playback_status = false;
 };
 
-static void apply_playback_control(kaillera_next_adapter::impl &adapter, const KnPlaybackControl &control)
+static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlaybackControl &control)
 {
 	if (!adapter.spectator)
 		return;
@@ -386,7 +444,7 @@ static u32 player_for_field(ioport_field &field)
 	return field.player();
 }
 
-static void build_input_map(kaillera_next_adapter::impl &adapter)
+static void build_input_map(kaileron_adapter::impl &adapter)
 {
 	if (adapter.input_map_built)
 		return;
@@ -407,14 +465,14 @@ static void build_input_map(kaillera_next_adapter::impl &adapter)
 
 	adapter.input_map_built = true;
 	if (adapter.trace)
-		osd_printf_info("Kaillera Next trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
+		osd_printf_info("Kaileron trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
 	if (env_enabled("KN_MAME_DUMP_INPUT_MAP"))
 	{
 		for (mapped_input_field const &mapped : adapter.input_map)
 		{
 			std::string const name = mapped.field->name();
 			osd_printf_info(
-					"Kaillera Next input map: player=%u byte=%u bit=%02x type=%u name=%s\n",
+					"Kaileron input map: player=%u byte=%u bit=%02x type=%u name=%s\n",
 					mapped.player,
 					mapped.byte,
 					mapped.bit,
@@ -424,7 +482,7 @@ static void build_input_map(kaillera_next_adapter::impl &adapter)
 	}
 }
 
-static u32 required_input_size(kaillera_next_adapter::impl &adapter)
+static u32 required_input_size(kaileron_adapter::impl &adapter)
 {
 	build_input_map(adapter);
 
@@ -440,26 +498,26 @@ static bool input_size_env_is_auto()
 	return !value || !value[0] || std::strcmp(value, "auto") == 0;
 }
 
-static u32 resolve_input_size(kaillera_next_adapter::impl &adapter)
+static u32 resolve_input_size(kaileron_adapter::impl &adapter)
 {
 	u32 const required = required_input_size(adapter);
 	const char *value = std::getenv("KN_INPUT_SIZE");
 	if (input_size_env_is_auto())
 	{
 		if (adapter.trace || env_enabled("KN_MAME_DUMP_INPUT_MAP"))
-			osd_printf_info("Kaillera Next: auto input_size=%u from mapped ioports\n", required);
+			osd_printf_info("Kaileron: auto input_size=%u from mapped ioports\n", required);
 		return required;
 	}
 
 	u32 requested = 0;
 	if (!parse_u32(value, requested) || requested == 0)
 	{
-		osd_printf_error("Kaillera Next: invalid KN_INPUT_SIZE=%s; using auto input_size=%u\n", value, required);
+		osd_printf_error("Kaileron: invalid KN_INPUT_SIZE=%s; using auto input_size=%u\n", value, required);
 		return required;
 	}
 	if (requested < required)
 	{
-		osd_printf_error("Kaillera Next: KN_INPUT_SIZE=%u is smaller than mapped ioports require %u; raising input_size\n", requested, required);
+		osd_printf_error("Kaileron: KN_INPUT_SIZE=%u is smaller than mapped ioports require %u; raising input_size\n", requested, required);
 		return required;
 	}
 	return requested;
@@ -479,7 +537,7 @@ static u32 frame_duration_us(running_machine &machine)
 	return microseconds > 0xffffffffULL ? 0 : u32(microseconds);
 }
 
-static void sync_programmatic_inputs(kaillera_next_adapter::impl &adapter)
+static void sync_programmatic_inputs(kaileron_adapter::impl &adapter)
 {
 	for (auto &port : adapter.machine.ioport().ports())
 		port.second->frame_update();
@@ -491,7 +549,7 @@ static void set_input_bit(u8 *bytes, u32 len, u32 byte, u8 bit)
 		bytes[byte] |= bit;
 }
 
-static void read_local_input(kaillera_next_adapter::impl &adapter, u8 *bytes, u32 len)
+static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len)
 {
 	build_input_map(adapter);
 
@@ -523,7 +581,7 @@ static bool mapped_input_pressed(const KnInput *players, u32 player_count, mappe
 	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
 }
 
-static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnInput *players, u32 player_count)
+static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count)
 {
 	bool apply_to_mame = env_enabled("KN_MAME_APPLY_INPUT");
 	build_input_map(adapter);
@@ -531,7 +589,7 @@ static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnIn
 	{
 		if (!adapter.warned_missing_ports)
 		{
-			osd_printf_error("Kaillera Next: no mappable digital input fields are available; skipping input injection\n");
+			osd_printf_error("Kaileron: no mappable digital input fields are available; skipping input injection\n");
 			adapter.warned_missing_ports = true;
 		}
 		return;
@@ -546,7 +604,7 @@ static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnIn
 			adapter.nonneutral_input_count++;
 		if (adapter.trace && player < 2 && input != adapter.last_applied_input[player])
 		{
-			osd_printf_info("Kaillera Next trace: apply_input frame=%u player=%u input=%02x machine=%s\n",
+			osd_printf_info("Kaileron trace: apply_input frame=%u player=%u input=%02x machine=%s\n",
 					adapter.frame_count, player, input, adapter.machine.system().name);
 			adapter.last_applied_input[player] = input;
 		}
@@ -563,7 +621,7 @@ static void apply_mapped_inputs(kaillera_next_adapter::impl &adapter, const KnIn
 
 static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, KnMutableInput *out_input)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter || !out_input || !out_input->bytes || out_input->cap == 0)
 		return KN_ERR_INVALID_ARGUMENT;
 
@@ -574,7 +632,7 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 		read_local_input(*adapter, out_input->bytes, out_input->len);
 		scripted_start_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
-			osd_printf_info("Kaillera Next trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
+			osd_printf_info("Kaileron trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
@@ -587,14 +645,14 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 
 static KnResult KN_CALL kn_mame_save_state(void *user, u32 frame)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter)
 		return KN_ERR_INVALID_ARGUMENT;
 	if (adapter->machine.scheduled_event_pending())
 		return KN_OK;
 
 	if (adapter->trace && adapter->save_count < 5)
-		osd_printf_info("Kaillera Next trace: save_state frame=%u\n", frame);
+		osd_printf_info("Kaileron trace: save_state frame=%u\n", frame);
 
 	int size = ram_state::get_size(adapter->machine.save());
 	if (size <= 0)
@@ -608,13 +666,13 @@ static KnResult KN_CALL kn_mame_save_state(void *user, u32 frame)
 	adapter->snapshots[frame] = std::move(bytes);
 	adapter->save_count++;
 	if (adapter->trace && adapter->save_count < 6)
-		osd_printf_info("Kaillera Next trace: save_state done frame=%u size=%u\n", frame, adapter->last_snapshot_size);
+		osd_printf_info("Kaileron trace: save_state done frame=%u size=%u\n", frame, adapter->last_snapshot_size);
 	return KN_OK;
 }
 
 static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter)
 		return KN_ERR_INVALID_ARGUMENT;
 	if (adapter->machine.scheduled_event_pending())
@@ -625,7 +683,7 @@ static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 		return KN_ERR_CALLBACK;
 
 	if (adapter->trace)
-		osd_printf_info("Kaillera Next trace: load_state frame=%u size=%u load_count=%u current_mame_frames=%u\n", frame, u32(found->second.size()), adapter->load_count, adapter->frame_count);
+		osd_printf_info("Kaileron trace: load_state frame=%u size=%u load_count=%u current_mame_frames=%u\n", frame, u32(found->second.size()), adapter->load_count, adapter->frame_count);
 
 	if (adapter->machine.save().read_buffer(found->second.data(), found->second.size()) != STATERR_NONE)
 		return KN_ERR_CALLBACK;
@@ -633,13 +691,13 @@ static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 	adapter->load_count++;
 	adapter->hide_replay_video = true;
 	if (adapter->trace)
-		osd_printf_info("Kaillera Next trace: load_state done frame=%u load_count=%u\n", frame, adapter->load_count);
+		osd_printf_info("Kaileron trace: load_state done frame=%u load_count=%u\n", frame, adapter->load_count);
 	return KN_OK;
 }
 
 static void KN_CALL kn_mame_discard_states_before(void *user, u32 frame)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter)
 		return;
 
@@ -654,14 +712,14 @@ static void KN_CALL kn_mame_discard_states_before(void *user, u32 frame)
 
 static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInput *players, u32 player_count)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter)
 		return KN_ERR_INVALID_ARGUMENT;
 	if (adapter->machine.scheduled_event_pending())
 		return KN_OK;
 
 	if (adapter->trace && adapter->load_count > 0)
-		osd_printf_info("Kaillera Next trace: advance_frame frame=%u before mame_frames=%u loads=%u\n", frame, adapter->frame_count, adapter->load_count);
+		osd_printf_info("Kaileron trace: advance_frame frame=%u before mame_frames=%u loads=%u\n", frame, adapter->frame_count, adapter->load_count);
 
 	apply_mapped_inputs(*adapter, players, player_count);
 
@@ -678,7 +736,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 		if (++guard > guard_limit)
 		{
 			if (adapter->trace)
-				osd_printf_info("Kaillera Next trace: advance_frame guard exhausted frame=%u current_mame_frames=%u target_mame_frames=%u guard=%u\n",
+				osd_printf_info("Kaileron trace: advance_frame guard exhausted frame=%u current_mame_frames=%u target_mame_frames=%u guard=%u\n",
 						frame, adapter->frame_count, target_frame, guard);
 			if (hide_video)
 				g_kn_mame_hide_replay_video = false;
@@ -691,7 +749,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	adapter->in_advance = false;
 	adapter->advance_count++;
 	if (adapter->trace && adapter->load_count > 0)
-		osd_printf_info("Kaillera Next trace: advance_frame done frame=%u after mame_frames=%u advances=%u\n", frame, adapter->frame_count, adapter->advance_count);
+		osd_printf_info("Kaileron trace: advance_frame done frame=%u after mame_frames=%u advances=%u\n", frame, adapter->frame_count, adapter->advance_count);
 
 	(void)frame;
 	return KN_OK;
@@ -699,7 +757,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 
 static u64 KN_CALL kn_mame_state_hash(void *user)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter)
 		return 0;
 
@@ -716,13 +774,13 @@ static u64 KN_CALL kn_mame_state_hash(void *user)
 
 static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackControl *control)
 {
-	auto *adapter = static_cast<kaillera_next_adapter::impl *>(user);
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
 	if (!adapter || !control)
 		return;
 	apply_playback_control(*adapter, *control);
 }
 
-static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
+static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 {
 	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_host_session_get_playback_status)
 		return;
@@ -741,8 +799,8 @@ static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
 	std::string const short_text = status.short_text;
 	std::string const detail_text = status.detail_text;
 	std::string const message = detail_text.empty()
-			? "Kaillera Next: " + short_text
-			: "Kaillera Next: " + short_text + "\n" + detail_text;
+			? "Kaileron: " + short_text
+			: "Kaileron: " + short_text + "\n" + detail_text;
 
 	if (message != adapter.last_status_text ||
 			now - adapter.last_status_at >= std::chrono::milliseconds(2000))
@@ -753,23 +811,23 @@ static void update_playback_status_overlay(kaillera_next_adapter::impl &adapter)
 	adapter.last_status_at = now;
 }
 
-std::unique_ptr<kaillera_next_adapter> kaillera_next_adapter::create(running_machine &machine)
+std::unique_ptr<kaileron_adapter> kaileron_adapter::create(running_machine &machine)
 {
 	if (!env_enabled("KN_MAME"))
 		return nullptr;
 
-	auto adapter = std::make_unique<kaillera_next_adapter>(machine);
+	auto adapter = std::make_unique<kaileron_adapter>(machine);
 	if (!adapter->initialize())
 		return nullptr;
 	return adapter;
 }
 
-kaillera_next_adapter::kaillera_next_adapter(running_machine &machine) :
+kaileron_adapter::kaileron_adapter(running_machine &machine) :
 	m_impl(std::make_unique<impl>(machine))
 {
 }
 
-kaillera_next_adapter::~kaillera_next_adapter()
+kaileron_adapter::~kaileron_adapter()
 {
 	on_exit();
 	if (m_impl->session && m_impl->kn_host_session_destroy)
@@ -777,17 +835,18 @@ kaillera_next_adapter::~kaillera_next_adapter()
 	m_impl->session = nullptr;
 
 	if (m_impl->library)
-		dlclose(m_impl->library);
+		close_sdk_library(m_impl->library);
 	m_impl->library = nullptr;
 }
 
-bool kaillera_next_adapter::initialize()
+bool kaileron_adapter::initialize()
 {
-	const char *library_path = env_value("KN_SDK_LIB", "target/debug/libkaillera_next.so");
-	m_impl->library = dlopen(library_path, RTLD_NOW | RTLD_LOCAL);
+	const char *library_path = env_value("KN_SDK_LIB", default_sdk_library_path());
+	std::string load_error;
+	m_impl->library = open_sdk_library(library_path, load_error);
 	if (!m_impl->library)
 	{
-		osd_printf_error("Kaillera Next: failed to load %s: %s\n", library_path, dlerror());
+		osd_printf_error("Kaileron: failed to load %s: %s\n", library_path, load_error.c_str());
 		return false;
 	}
 
@@ -825,7 +884,7 @@ bool kaillera_next_adapter::initialize()
 	KnCallbacks callbacks = {};
 	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
 	{
-		osd_printf_error("Kaillera Next: kn_callbacks_init failed\n");
+		osd_printf_error("Kaileron: kn_callbacks_init failed\n");
 		return false;
 	}
 	callbacks.poll_local_input = kn_mame_poll_local_input;
@@ -840,7 +899,7 @@ bool kaillera_next_adapter::initialize()
 	KnConfig config = {};
 	if (m_impl->kn_config_init(&config) != KN_OK)
 	{
-		osd_printf_error("Kaillera Next: kn_config_init failed\n");
+		osd_printf_error("Kaileron: kn_config_init failed\n");
 		return false;
 	}
 	config.server_addr = server;
@@ -862,13 +921,13 @@ bool kaillera_next_adapter::initialize()
 	KnResult result = m_impl->kn_host_session_create(&config, &callbacks, &m_impl->session);
 	if (result != KN_OK)
 	{
-		osd_printf_error("Kaillera Next: kn_host_session_create failed result=%d\n", int(result));
+		osd_printf_error("Kaileron: kn_host_session_create failed result=%d\n", int(result));
 		return false;
 	}
 
 	m_impl->initialized = true;
 	osd_printf_info(
-			"Kaillera Next: enabled server=%s session=%s player=%u/%u input_size=%u sdk=%s\n",
+			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u sdk=%s\n",
 			server[0] ? server : "(local)",
 			session,
 			config.player_id,
@@ -878,7 +937,7 @@ bool kaillera_next_adapter::initialize()
 	return true;
 }
 
-bool kaillera_next_adapter::tick()
+bool kaileron_adapter::tick()
 {
 	if (!m_impl->initialized || !m_impl->session)
 		return false;
@@ -893,7 +952,7 @@ bool kaillera_next_adapter::tick()
 	m_impl->hide_replay_video = false;
 	if (result != KN_OK)
 	{
-		osd_printf_error("Kaillera Next: tick failed result=%d\n", int(result));
+		osd_printf_error("Kaileron: tick failed result=%d\n", int(result));
 		m_impl->machine.schedule_exit();
 	}
 	else
@@ -940,12 +999,12 @@ bool kaillera_next_adapter::tick()
 	return true;
 }
 
-void kaillera_next_adapter::frame_done()
+void kaileron_adapter::frame_done()
 {
 	m_impl->frame_count++;
 }
 
-void kaillera_next_adapter::on_exit()
+void kaileron_adapter::on_exit()
 {
 	if (!m_impl->initialized || !m_impl->session || m_impl->reported_exit)
 		return;

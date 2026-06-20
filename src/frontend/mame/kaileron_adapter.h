@@ -1,7 +1,7 @@
 // license:BSD-3-Clause
 
-#ifndef MAME_FRONTEND_MAME_KAILLERA_NEXT_ADAPTER_H
-#define MAME_FRONTEND_MAME_KAILLERA_NEXT_ADAPTER_H
+#ifndef MAME_FRONTEND_MAME_KAILERON_ADAPTER_H
+#define MAME_FRONTEND_MAME_KAILERON_ADAPTER_H
 
 #pragma once
 
@@ -9,13 +9,13 @@
 
 #include <memory>
 
-class kaillera_next_adapter
+class kaileron_adapter
 {
 public:
-	static std::unique_ptr<kaillera_next_adapter> create(running_machine &machine);
+	static std::unique_ptr<kaileron_adapter> create(running_machine &machine);
 
-	kaillera_next_adapter(running_machine &machine);
-	~kaillera_next_adapter();
+	kaileron_adapter(running_machine &machine);
+	~kaileron_adapter();
 
 	bool initialize();
 	bool tick();
@@ -31,4 +31,4 @@ private:
 	std::unique_ptr<impl> m_impl;
 };
 
-#endif // MAME_FRONTEND_MAME_KAILLERA_NEXT_ADAPTER_H
+#endif // MAME_FRONTEND_MAME_KAILERON_ADAPTER_H

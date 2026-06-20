@@ -88,7 +88,7 @@ public:
 	virtual void before_load_settings(running_machine &machine) { }
 
 	virtual void update_machine() { }
-	virtual bool kaillera_next_tick(running_machine &machine) { return false; }
+	virtual bool kaileron_tick(running_machine &machine) { return false; }
 
 	http_manager *http();
 	void start_http_server();
