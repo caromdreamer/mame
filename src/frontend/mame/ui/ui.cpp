@@ -109,6 +109,7 @@ static input_item_id const non_char_keys[] =
 // messagebox buffer
 std::string mame_ui_manager::messagebox_text;
 std::string mame_ui_manager::messagebox_poptext;
+extern std::string g_kn_mame_status_overlay;
 
 // slider info
 std::vector<ui::menu_item> mame_ui_manager::slider_list;
@@ -971,6 +972,9 @@ bool mame_ui_manager::update_and_render(render_target &target)
 		draw_text_box(current_ui_target(), messagebox_poptext, ui::text_layout::text_justify::CENTER, 0.5F, 0.9F, colors().background_color());
 	else
 		m_popup_text_end = 0;
+
+	if (!g_kn_mame_status_overlay.empty())
+		draw_text_box(current_ui_target(), g_kn_mame_status_overlay, ui::text_layout::text_justify::CENTER, 0.5F, 0.08F, colors().background_color());
 
 	// display the internal pointers
 	bool const pointer_update = m_pointers_changed;

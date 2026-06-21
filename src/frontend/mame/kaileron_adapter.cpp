@@ -31,6 +31,7 @@
 #include <vector>
 
 extern bool g_kn_mame_hide_replay_video;
+std::string g_kn_mame_status_overlay;
 
 namespace {
 
@@ -116,6 +117,13 @@ bool env_enabled(const char *name)
 {
 	const char *value = std::getenv(name);
 	return value && value[0] && std::strcmp(value, "0");
+}
+
+void show_kaileron_status(running_machine &machine, const std::string &message)
+{
+	g_kn_mame_status_overlay = message;
+	machine.popmessage("%s", message.c_str());
+	osd_printf_info("%s\n", message.c_str());
 }
 
 static void input_slot(u32 slot, u32 &byte, u8 &bit)
@@ -782,7 +790,7 @@ static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackCon
 
 static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 {
-	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_host_session_get_playback_status)
+	if (!adapter.show_playback_status)
 		return;
 
 	auto const now = std::chrono::steady_clock::now();
@@ -790,22 +798,44 @@ static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 			now - adapter.last_status_at < std::chrono::milliseconds(750))
 		return;
 
-	KnPlaybackStatus status = {};
-	if (adapter.kn_playback_status_init)
-		adapter.kn_playback_status_init(&status);
-	if (adapter.kn_host_session_get_playback_status(adapter.session, &status) != KN_OK)
-		return;
+	std::string message;
+	if (adapter.spectator && adapter.kn_host_session_get_playback_status)
+	{
+		KnPlaybackStatus status = {};
+		if (adapter.kn_playback_status_init)
+			adapter.kn_playback_status_init(&status);
+		if (adapter.kn_host_session_get_playback_status(adapter.session, &status) != KN_OK)
+			return;
 
-	std::string const short_text = status.short_text;
-	std::string const detail_text = status.detail_text;
-	std::string const message = detail_text.empty()
-			? "Kaileron: " + short_text
-			: "Kaileron: " + short_text + "\n" + detail_text;
+		std::string const short_text = status.short_text;
+		std::string const detail_text = status.detail_text;
+		message = detail_text.empty()
+				? "Kaileron: " + short_text
+				: "Kaileron: " + short_text + "\n" + detail_text;
+	}
+	else
+	{
+		message = "Kaileron netplay: player " + std::to_string(adapter.player_id + 1) + "/" + std::to_string(adapter.player_count);
+		if (adapter.kn_host_session_get_metrics)
+		{
+			KnMetrics metrics = {};
+			if (adapter.kn_host_session_get_metrics(adapter.session, &metrics) == KN_OK)
+			{
+				u32 const prediction_lead = metrics.current_frame > metrics.confirmed_frame_count
+						? metrics.current_frame - metrics.confirmed_frame_count
+						: 0;
+				message += " lead=" + std::to_string(prediction_lead);
+				message += " rollbacks=" + std::to_string(metrics.rollback_count);
+				message += " max=" + std::to_string(metrics.max_rollback_frames);
+			}
+		}
+	}
 
 	if (message != adapter.last_status_text ||
 			now - adapter.last_status_at >= std::chrono::milliseconds(2000))
 	{
 		adapter.machine.popmessage("%s", message.c_str());
+		g_kn_mame_status_overlay = message;
 		adapter.last_status_text = message;
 	}
 	adapter.last_status_at = now;
@@ -814,7 +844,12 @@ static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 std::unique_ptr<kaileron_adapter> kaileron_adapter::create(running_machine &machine)
 {
 	if (!env_enabled("KN_MAME"))
+	{
+		show_kaileron_status(machine, "Kaileron: not launched by adapter");
 		return nullptr;
+	}
+
+	show_kaileron_status(machine, "Kaileron: KN_MAME detected");
 
 	auto adapter = std::make_unique<kaileron_adapter>(machine);
 	if (!adapter->initialize())
@@ -842,13 +877,16 @@ kaileron_adapter::~kaileron_adapter()
 bool kaileron_adapter::initialize()
 {
 	const char *library_path = env_value("KN_SDK_LIB", default_sdk_library_path());
+	show_kaileron_status(m_impl->machine, std::string("Kaileron: loading SDK ") + library_path);
 	std::string load_error;
 	m_impl->library = open_sdk_library(library_path, load_error);
 	if (!m_impl->library)
 	{
 		osd_printf_error("Kaileron: failed to load %s: %s\n", library_path, load_error.c_str());
+		show_kaileron_status(m_impl->machine, std::string("Kaileron: SDK load failed ") + library_path);
 		return false;
 	}
+	show_kaileron_status(m_impl->machine, "Kaileron: SDK loaded");
 
 	if (!load_symbol(m_impl->library, "kn_config_init", m_impl->kn_config_init) ||
 		!load_symbol(m_impl->library, "kn_callbacks_init", m_impl->kn_callbacks_init) ||
@@ -860,8 +898,10 @@ bool kaileron_adapter::initialize()
 		!load_symbol(m_impl->library, "kn_host_session_get_playback_status", m_impl->kn_host_session_get_playback_status) ||
 		!load_symbol(m_impl->library, "kn_host_session_leave", m_impl->kn_host_session_leave))
 	{
+		show_kaileron_status(m_impl->machine, "Kaileron: SDK symbol load failed");
 		return false;
 	}
+	show_kaileron_status(m_impl->machine, "Kaileron: SDK symbols loaded");
 
 	const char *server = env_value("KN_SERVER", "");
 	m_impl->networked = server[0] != 0;
@@ -876,7 +916,7 @@ bool kaileron_adapter::initialize()
 	m_impl->player_count = player_count;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
-	m_impl->show_playback_status = m_impl->spectator && std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
+	m_impl->show_playback_status = std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
@@ -885,6 +925,7 @@ bool kaileron_adapter::initialize()
 	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
 	{
 		osd_printf_error("Kaileron: kn_callbacks_init failed\n");
+		show_kaileron_status(m_impl->machine, "Kaileron: callbacks init failed");
 		return false;
 	}
 	callbacks.poll_local_input = kn_mame_poll_local_input;
@@ -900,6 +941,7 @@ bool kaileron_adapter::initialize()
 	if (m_impl->kn_config_init(&config) != KN_OK)
 	{
 		osd_printf_error("Kaileron: kn_config_init failed\n");
+		show_kaileron_status(m_impl->machine, "Kaileron: config init failed");
 		return false;
 	}
 	config.server_addr = server;
@@ -918,10 +960,12 @@ bool kaileron_adapter::initialize()
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);
 
+	show_kaileron_status(m_impl->machine, std::string("Kaileron: creating session ") + session);
 	KnResult result = m_impl->kn_host_session_create(&config, &callbacks, &m_impl->session);
 	if (result != KN_OK)
 	{
 		osd_printf_error("Kaileron: kn_host_session_create failed result=%d\n", int(result));
+		show_kaileron_status(m_impl->machine, "Kaileron: session create failed result=" + std::to_string(int(result)));
 		return false;
 	}
 
@@ -934,6 +978,7 @@ bool kaileron_adapter::initialize()
 			config.player_count,
 			input_size,
 			library_path);
+	update_playback_status_overlay(*m_impl);
 	return true;
 }
 
@@ -1008,6 +1053,7 @@ void kaileron_adapter::on_exit()
 {
 	if (!m_impl->initialized || !m_impl->session || m_impl->reported_exit)
 		return;
+	g_kn_mame_status_overlay.clear();
 
 	KnPlaybackControl control = {};
 	control.target_speed_percent = 100;
