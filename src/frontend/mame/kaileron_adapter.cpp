@@ -31,6 +31,7 @@
 #include <vector>
 
 extern bool g_kn_mame_hide_replay_video;
+std::string g_kn_mame_status_overlay;
 
 namespace {
 
@@ -782,7 +783,7 @@ static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackCon
 
 static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 {
-	if (!adapter.spectator || !adapter.show_playback_status || !adapter.kn_host_session_get_playback_status)
+	if (!adapter.show_playback_status)
 		return;
 
 	auto const now = std::chrono::steady_clock::now();
@@ -790,22 +791,31 @@ static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 			now - adapter.last_status_at < std::chrono::milliseconds(750))
 		return;
 
-	KnPlaybackStatus status = {};
-	if (adapter.kn_playback_status_init)
-		adapter.kn_playback_status_init(&status);
-	if (adapter.kn_host_session_get_playback_status(adapter.session, &status) != KN_OK)
-		return;
+	std::string message;
+	if (adapter.spectator && adapter.kn_host_session_get_playback_status)
+	{
+		KnPlaybackStatus status = {};
+		if (adapter.kn_playback_status_init)
+			adapter.kn_playback_status_init(&status);
+		if (adapter.kn_host_session_get_playback_status(adapter.session, &status) != KN_OK)
+			return;
 
-	std::string const short_text = status.short_text;
-	std::string const detail_text = status.detail_text;
-	std::string const message = detail_text.empty()
-			? "Kaileron: " + short_text
-			: "Kaileron: " + short_text + "\n" + detail_text;
+		std::string const short_text = status.short_text;
+		std::string const detail_text = status.detail_text;
+		message = detail_text.empty()
+				? "Kaileron: " + short_text
+				: "Kaileron: " + short_text + "\n" + detail_text;
+	}
+	else
+	{
+		message = "Kaileron netplay: player " + std::to_string(adapter.player_id + 1) + "/" + std::to_string(adapter.player_count);
+	}
 
 	if (message != adapter.last_status_text ||
 			now - adapter.last_status_at >= std::chrono::milliseconds(2000))
 	{
 		adapter.machine.popmessage("%s", message.c_str());
+		g_kn_mame_status_overlay = message;
 		adapter.last_status_text = message;
 	}
 	adapter.last_status_at = now;
@@ -876,7 +886,7 @@ bool kaileron_adapter::initialize()
 	m_impl->player_count = player_count;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
-	m_impl->show_playback_status = m_impl->spectator && std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
+	m_impl->show_playback_status = std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
@@ -934,6 +944,7 @@ bool kaileron_adapter::initialize()
 			config.player_count,
 			input_size,
 			library_path);
+	update_playback_status_overlay(*m_impl);
 	return true;
 }
 
@@ -1006,6 +1017,7 @@ void kaileron_adapter::frame_done()
 
 void kaileron_adapter::on_exit()
 {
+	g_kn_mame_status_overlay.clear();
 	if (!m_impl->initialized || !m_impl->session || m_impl->reported_exit)
 		return;
 
