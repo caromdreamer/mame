@@ -301,6 +301,7 @@ struct kaileron_adapter::impl
 	u32 nonneutral_input_count = 0;
 	u32 last_snapshot_size = 0;
 	u32 last_paced_frame = 0;
+	u32 frame_duration_us = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point next_frame_at = {};
@@ -923,6 +924,7 @@ bool kaileron_adapter::initialize()
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
+	m_impl->frame_duration_us = frame_duration_us(m_impl->machine);
 
 	KnCallbacks callbacks = {};
 	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
@@ -957,8 +959,8 @@ bool kaileron_adapter::initialize()
 	config.input_size = input_size_env_is_auto() ? 0 : input_size;
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
-	config.max_prediction_frames = env_u32("KN_MAX_PREDICTION", server[0] ? 20 : 0);
-	config.frame_duration_us = frame_duration_us(m_impl->machine);
+	config.max_prediction_frames = env_u32("KN_MAX_PREDICTION", server[0] ? 4 : 0);
+	config.frame_duration_us = m_impl->frame_duration_us;
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);
@@ -1012,23 +1014,36 @@ bool kaileron_adapter::tick()
 		KnMetrics metrics = {};
 		if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 		{
-			u32 frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
+			u32 const override_frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
+			u32 const frame_us = override_frame_ms > 0
+					? override_frame_ms * 1000
+					: (m_impl->frame_duration_us > 0 ? m_impl->frame_duration_us : 16667);
 			if (metrics.current_frame == 0 ||
 					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
-				std::this_thread::sleep_for(std::chrono::milliseconds(frame_ms > 0 ? frame_ms : 1));
+				std::this_thread::sleep_for(std::chrono::microseconds(frame_us));
 
-			if (frame_ms > 0 && metrics.current_frame > m_impl->last_paced_frame)
+			if (metrics.current_frame > m_impl->last_paced_frame)
 			{
 				auto now = std::chrono::steady_clock::now();
 				if (m_impl->next_frame_at.time_since_epoch().count() == 0)
 					m_impl->next_frame_at = now;
 				u32 advanced = metrics.current_frame - m_impl->last_paced_frame;
-				m_impl->next_frame_at += std::chrono::milliseconds(u64(frame_ms) * advanced);
+				m_impl->next_frame_at += std::chrono::microseconds(u64(frame_us) * advanced);
 				if (now < m_impl->next_frame_at)
 					std::this_thread::sleep_until(m_impl->next_frame_at);
 				else if (now - m_impl->next_frame_at > std::chrono::milliseconds(250))
 					m_impl->next_frame_at = now;
 				m_impl->last_paced_frame = metrics.current_frame;
+			}
+
+			u32 const target_prediction = env_u32("KN_TARGET_PREDICTION", 2);
+			u32 const prediction_lead = metrics.current_frame > metrics.confirmed_frame_count
+					? metrics.current_frame - metrics.confirmed_frame_count
+					: 0;
+			if (target_prediction > 0 && prediction_lead > target_prediction)
+			{
+				u32 const extra_frames = std::min<u32>(prediction_lead - target_prediction, 4);
+				std::this_thread::sleep_for(std::chrono::microseconds(u64(frame_us) * extra_frames));
 			}
 		}
 		else if (m_impl->spectator)
