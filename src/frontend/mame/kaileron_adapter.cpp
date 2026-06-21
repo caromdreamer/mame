@@ -148,21 +148,6 @@ static u32 button_slot(u32 button)
 
 static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
 {
-	if (env_enabled("KN_MAME_SCRIPT_START"))
-	{
-		if (player == 0)
-		{
-			if (frame < 30)
-				set_input_slot(bytes, len, KN_SLOT_COIN);
-			if (frame >= 45 && frame < 75)
-				set_input_slot(bytes, len, KN_SLOT_START);
-		}
-		else if (player == 1 && frame >= 75 && frame < 105)
-		{
-			set_input_slot(bytes, len, KN_SLOT_START);
-		}
-	}
-
 	const u32 phase = (frame / 24 + player) % 4;
 	switch (phase)
 	{
@@ -182,17 +167,6 @@ static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
 		set_input_slot(bytes, len, KN_SLOT_UP);
 		break;
 	}
-}
-
-static void scripted_start_input(u8 *bytes, u32 len, u32 frame, u32 player)
-{
-	if (!env_enabled("KN_MAME_AUTO_START") || player != 0)
-		return;
-
-	if (frame >= 30 && frame < 45)
-		set_input_slot(bytes, len, KN_SLOT_COIN);
-	if (frame >= 75 && frame < 90)
-		set_input_slot(bytes, len, KN_SLOT_START);
 }
 
 u64 fnv1a64(const u8 *bytes, std::size_t len)
@@ -639,7 +613,6 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
 		read_local_input(*adapter, out_input->bytes, out_input->len);
-		scripted_start_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
 			osd_printf_info("Kaileron trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
