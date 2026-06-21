@@ -853,7 +853,10 @@ std::unique_ptr<kaileron_adapter> kaileron_adapter::create(running_machine &mach
 
 	auto adapter = std::make_unique<kaileron_adapter>(machine);
 	if (!adapter->initialize())
+	{
+		machine.schedule_exit();
 		return nullptr;
+	}
 	return adapter;
 }
 
