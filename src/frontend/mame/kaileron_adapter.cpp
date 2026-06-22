@@ -1005,7 +1005,7 @@ bool kaileron_adapter::tick()
 					? std::max<u32>(m_impl->sdk_playback_speed_factor, 1000)
 					: 1000;
 			u64 const paced_frame_us = std::max<u64>(1, (u64(frame_us) * 1000) / playback_speed_factor);
-			bool const uncapped_catchup = m_impl->sdk_playback_override && playback_speed_factor >= 32000;
+			bool const uncapped_catchup = m_impl->sdk_playback_override && playback_speed_factor >= 128000;
 			if (metrics.current_frame == 0 ||
 					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
 			{
