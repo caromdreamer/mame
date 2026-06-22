@@ -85,6 +85,12 @@ u32 env_u32(const char *name, u32 fallback)
 	return u32(parsed);
 }
 
+bool env_present(const char *name)
+{
+	const char *value = std::getenv(name);
+	return value && value[0];
+}
+
 u64 env_u64(const char *name, u64 fallback)
 {
 	const char *value = std::getenv(name);
@@ -805,10 +811,10 @@ static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 			KnMetrics metrics = {};
 			if (adapter.kn_host_session_get_metrics(adapter.session, &metrics) == KN_OK)
 			{
-				u32 const prediction_lead = metrics.current_frame > metrics.confirmed_frame_count
+				u32 const confirm_lag = metrics.current_frame > metrics.confirmed_frame_count
 						? metrics.current_frame - metrics.confirmed_frame_count
 						: 0;
-				message += " lead=" + std::to_string(prediction_lead);
+				message += " confirm_lag=" + std::to_string(confirm_lag);
 				message += " rollbacks=" + std::to_string(metrics.rollback_count);
 				message += " max=" + std::to_string(metrics.max_rollback_frames);
 			}
@@ -942,7 +948,10 @@ bool kaileron_adapter::initialize()
 	config.input_size = input_size_env_is_auto() ? 0 : input_size;
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
-	config.max_prediction_frames = env_u32("KN_MAX_PREDICTION", server[0] ? 4 : 0);
+	u32 const default_max_prediction = server[0] ? std::max<u32>(config.input_delay_frames, 1) : 0;
+	config.max_prediction_frames = env_present("KN_MAX_PREDICTION")
+		? env_u32("KN_MAX_PREDICTION", default_max_prediction)
+		: default_max_prediction;
 	config.frame_duration_us = m_impl->frame_duration_us;
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
