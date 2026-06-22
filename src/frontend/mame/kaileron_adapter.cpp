@@ -291,8 +291,10 @@ struct kaileron_adapter::impl
 	bool networked = false;
 	bool spectator = false;
 	bool original_throttled = true;
+	bool original_ui_mute = false;
 	u32 original_speed_factor = 1000;
 	u32 sdk_playback_speed_factor = 1000;
+	u32 sdk_render_interval = 1;
 	bool sdk_playback_override = false;
 	bool hide_replay_video = false;
 	bool show_playback_status = false;
@@ -304,7 +306,7 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 		return;
 
 	u32 speed_percent = control.target_speed_percent ? control.target_speed_percent : 100;
-	speed_percent = std::clamp<u32>(speed_percent, 100, 1000);
+	speed_percent = std::clamp<u32>(speed_percent, 100, 12800);
 	u32 const speed_factor = speed_percent * 10;
 	bool const enabled = speed_factor != 1000;
 	if (enabled)
@@ -312,19 +314,24 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 		if (!adapter.sdk_playback_override)
 		{
 			adapter.original_throttled = adapter.machine.video().throttled();
+			adapter.original_ui_mute = adapter.machine.sound().ui_mute();
 			adapter.original_speed_factor = adapter.machine.video().speed_factor();
 		}
 		adapter.machine.video().set_fastforward(false);
-		adapter.machine.video().set_throttled(true);
-		adapter.machine.video().set_speed_factor(speed_factor);
+		adapter.machine.video().set_throttled(false);
+		adapter.machine.video().set_speed_factor(adapter.original_speed_factor);
+		adapter.machine.sound().ui_mute(adapter.original_ui_mute || control.mute_audio);
 		adapter.sdk_playback_speed_factor = speed_factor;
+		adapter.sdk_render_interval = std::max<u32>(control.render_interval, 1);
 	}
 	else if (adapter.sdk_playback_override)
 	{
 		adapter.machine.video().set_fastforward(false);
 		adapter.machine.video().set_throttled(adapter.original_throttled);
 		adapter.machine.video().set_speed_factor(adapter.original_speed_factor);
-		adapter.sdk_playback_speed_factor = adapter.original_speed_factor;
+		adapter.machine.sound().ui_mute(adapter.original_ui_mute);
+		adapter.sdk_playback_speed_factor = 1000;
+		adapter.sdk_render_interval = 1;
 	}
 	adapter.sdk_playback_override = enabled;
 }
@@ -706,7 +713,10 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	apply_mapped_inputs(*adapter, players, player_count);
 
 	adapter->in_advance = true;
-	bool const hide_video = adapter->hide_replay_video;
+	bool const skip_catchup_video = adapter->sdk_playback_override &&
+			adapter->sdk_render_interval > 1 &&
+			(frame % adapter->sdk_render_interval) != 0;
+	bool const hide_video = adapter->hide_replay_video || skip_catchup_video;
 	if (hide_video)
 		g_kn_mame_hide_replay_video = true;
 	u32 target_frame = adapter->frame_count + 1;
@@ -991,9 +1001,17 @@ bool kaileron_adapter::tick()
 			u32 const frame_us = override_frame_ms > 0
 					? override_frame_ms * 1000
 					: (m_impl->frame_duration_us > 0 ? m_impl->frame_duration_us : 16667);
+			u32 const playback_speed_factor = m_impl->sdk_playback_override
+					? std::max<u32>(m_impl->sdk_playback_speed_factor, 1000)
+					: 1000;
+			u64 const paced_frame_us = std::max<u64>(1, (u64(frame_us) * 1000) / playback_speed_factor);
+			bool const uncapped_catchup = m_impl->sdk_playback_override && playback_speed_factor >= 32000;
 			if (metrics.current_frame == 0 ||
 					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
-				std::this_thread::sleep_for(std::chrono::microseconds(frame_us));
+			{
+				if (!uncapped_catchup)
+					std::this_thread::sleep_for(std::chrono::microseconds(paced_frame_us));
+			}
 
 			if (metrics.current_frame > m_impl->last_paced_frame)
 			{
@@ -1001,8 +1019,8 @@ bool kaileron_adapter::tick()
 				if (m_impl->next_frame_at.time_since_epoch().count() == 0)
 					m_impl->next_frame_at = now;
 				u32 advanced = metrics.current_frame - m_impl->last_paced_frame;
-				m_impl->next_frame_at += std::chrono::microseconds(u64(frame_us) * advanced);
-				if (now < m_impl->next_frame_at)
+				m_impl->next_frame_at += std::chrono::microseconds(paced_frame_us * advanced);
+				if (!uncapped_catchup && now < m_impl->next_frame_at)
 					std::this_thread::sleep_until(m_impl->next_frame_at);
 				else if (now - m_impl->next_frame_at > std::chrono::milliseconds(250))
 					m_impl->next_frame_at = now;
@@ -1016,7 +1034,8 @@ bool kaileron_adapter::tick()
 			if (target_prediction > 0 && prediction_lead > target_prediction)
 			{
 				u32 const extra_frames = std::min<u32>(prediction_lead - target_prediction, 4);
-				std::this_thread::sleep_for(std::chrono::microseconds(u64(frame_us) * extra_frames));
+				if (!uncapped_catchup)
+					std::this_thread::sleep_for(std::chrono::microseconds(paced_frame_us * extra_frames));
 			}
 		}
 		else if (m_impl->spectator)
