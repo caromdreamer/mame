@@ -62,7 +62,7 @@ files {
 	MAME_DIR .. "src/frontend/mame/infoxml.h",
 	MAME_DIR .. "src/frontend/mame/iptseqpoll.cpp",
 	MAME_DIR .. "src/frontend/mame/iptseqpoll.h",
-	MAME_DIR .. "src/frontend/mame/kaileron_adapter.cpp",
+	MAME_DIR .. "src/frontend/mame/kaileron.cpp",
 	MAME_DIR .. "src/frontend/mame/kaileron_adapter.h",
 	MAME_DIR .. "src/frontend/mame/language.cpp",
 	MAME_DIR .. "src/frontend/mame/language.h",

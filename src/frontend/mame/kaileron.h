@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define KN_API_VERSION 5
+#define KN_API_VERSION 7
 #define KN_MAX_PLAYERS 4
 
 typedef struct KnClient KnClient;
@@ -87,7 +87,12 @@ typedef struct KnPlaybackControl {
   uint32_t target_speed_percent;
   uint32_t render_interval;
   uint32_t mute_audio;
-  uint32_t reserved[9];
+  /*
+    SDK-owned host pacing hint for the caller's main loop. Zero means the host
+    should not add a sleep for this tick.
+  */
+  uint32_t pace_delay_us;
+  uint32_t reserved[8];
 } KnPlaybackControl;
 
 typedef struct KnPlaybackStatus {
@@ -102,10 +107,37 @@ typedef struct KnPlaybackStatus {
   uint32_t target_speed_percent;
   uint32_t render_interval;
   uint32_t mute_audio;
-  uint32_t reserved[9];
+  uint32_t pace_delay_us;
+  uint32_t reserved[8];
   char short_text[32];
   char detail_text[128];
 } KnPlaybackStatus;
+
+typedef enum KnLifecycleEventType {
+  KN_LIFECYCLE_SESSION_CREATED = 1,
+  KN_LIFECYCLE_SESSION_CONNECTING = 2,
+  KN_LIFECYCLE_SESSION_WELCOMED = 3,
+  KN_LIFECYCLE_SESSION_READY_SENT = 4,
+  KN_LIFECYCLE_SESSION_STARTING = 5,
+  KN_LIFECYCLE_SESSION_STARTED = 6,
+  KN_LIFECYCLE_SESSION_LEFT = 7,
+  KN_LIFECYCLE_PEER_LEFT = 20,
+  KN_LIFECYCLE_ROLLBACK_BEGIN = 40,
+  KN_LIFECYCLE_ROLLBACK_END = 41,
+  KN_LIFECYCLE_ERROR = 60
+} KnLifecycleEventType;
+
+typedef enum KnLifecycleErrorReason {
+  KN_LIFECYCLE_ERROR_SERVER_TIMEOUT = 1
+} KnLifecycleErrorReason;
+
+typedef struct KnLifecycleEvent {
+  uint32_t type;
+  uint32_t frame;
+  uint32_t peer_id;
+  uint32_t reason;
+  uint32_t reserved[8];
+} KnLifecycleEvent;
 
 typedef struct KnCallbacks {
   /*
@@ -153,7 +185,13 @@ typedef struct KnCallbacks {
   */
   void(KN_CALL *set_playback_control)(void *user,
                                       const KnPlaybackControl *control);
-  uint32_t reserved[8];
+  /*
+    Optional lifecycle notification stream for session, peer, and rollback
+    state changes. Hosts may ignore it and continue polling metrics/status.
+  */
+  void(KN_CALL *on_lifecycle_event)(void *user,
+                                    const KnLifecycleEvent *event);
+  uint32_t reserved[7];
 } KnCallbacks;
 
 typedef struct KnConfig {

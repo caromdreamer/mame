@@ -127,9 +127,15 @@ bool env_enabled(const char *name)
 
 void show_kaileron_status(running_machine &machine, const std::string &message)
 {
+	osd_printf_info("%s\n", message.c_str());
+	if (!env_enabled("KN_MAME_STATUS"))
+	{
+		g_kn_mame_status_overlay.clear();
+		return;
+	}
+
 	g_kn_mame_status_overlay = message;
 	machine.popmessage("%s", message.c_str());
-	osd_printf_info("%s\n", message.c_str());
 }
 
 static void input_slot(u32 slot, u32 &byte, u8 &bit)
@@ -280,11 +286,9 @@ struct kaileron_adapter::impl
 	u32 injected_frame_count = 0;
 	u32 nonneutral_input_count = 0;
 	u32 last_snapshot_size = 0;
-	u32 last_paced_frame = 0;
 	u32 frame_duration_us = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
-	std::chrono::steady_clock::time_point next_frame_at = {};
 	std::chrono::steady_clock::time_point last_status_at = {};
 	std::vector<mapped_input_field> input_map;
 	std::string last_status_text;
@@ -301,13 +305,16 @@ struct kaileron_adapter::impl
 	u32 original_speed_factor = 1000;
 	u32 sdk_playback_speed_factor = 1000;
 	u32 sdk_render_interval = 1;
+	u32 sdk_pace_delay_us = 0;
 	bool sdk_playback_override = false;
 	bool hide_replay_video = false;
 	bool show_playback_status = false;
+	bool show_rollback_stats = false;
 };
 
 static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlaybackControl &control)
 {
+	adapter.sdk_pace_delay_us = control.pace_delay_us;
 	if (!adapter.spectator)
 		return;
 
@@ -778,6 +785,68 @@ static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackCon
 	apply_playback_control(*adapter, *control);
 }
 
+static const char *lifecycle_event_name(u32 type)
+{
+	switch (type)
+	{
+	case KN_LIFECYCLE_SESSION_CREATED:
+		return "session_created";
+	case KN_LIFECYCLE_SESSION_CONNECTING:
+		return "session_connecting";
+	case KN_LIFECYCLE_SESSION_WELCOMED:
+		return "session_welcomed";
+	case KN_LIFECYCLE_SESSION_READY_SENT:
+		return "session_ready_sent";
+	case KN_LIFECYCLE_SESSION_STARTING:
+		return "session_starting";
+	case KN_LIFECYCLE_SESSION_STARTED:
+		return "session_started";
+	case KN_LIFECYCLE_SESSION_LEFT:
+		return "session_left";
+	case KN_LIFECYCLE_PEER_LEFT:
+		return "peer_left";
+	case KN_LIFECYCLE_ROLLBACK_BEGIN:
+		return "rollback_begin";
+	case KN_LIFECYCLE_ROLLBACK_END:
+		return "rollback_end";
+	case KN_LIFECYCLE_ERROR:
+		return "error";
+	default:
+		return "unknown";
+	}
+}
+
+static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEvent *event)
+{
+	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
+	if (!adapter || !event)
+		return;
+
+	const char *name = lifecycle_event_name(event->type);
+	bool const rollback_event = event->type == KN_LIFECYCLE_ROLLBACK_BEGIN ||
+			event->type == KN_LIFECYCLE_ROLLBACK_END;
+	if (adapter->trace || !rollback_event)
+		osd_printf_info("Kaileron lifecycle: %s frame=%u peer=%u reason=%u\n",
+				name,
+				event->frame,
+				event->peer_id,
+				event->reason);
+
+	if (event->type == KN_LIFECYCLE_SESSION_STARTED)
+		show_kaileron_status(adapter->machine, "Kaileron: session started");
+	else if (event->type == KN_LIFECYCLE_SESSION_WELCOMED)
+		show_kaileron_status(adapter->machine, "Kaileron: connected");
+	else if (event->type == KN_LIFECYCLE_SESSION_STARTING)
+		show_kaileron_status(adapter->machine, "Kaileron: starting session");
+	else if (event->type == KN_LIFECYCLE_PEER_LEFT)
+		show_kaileron_status(adapter->machine, "Kaileron: peer left");
+	else if (event->type == KN_LIFECYCLE_ERROR &&
+			event->reason == KN_LIFECYCLE_ERROR_SERVER_TIMEOUT)
+		show_kaileron_status(adapter->machine, "Kaileron: server disconnected");
+	else if (event->type == KN_LIFECYCLE_SESSION_LEFT)
+		g_kn_mame_status_overlay.clear();
+}
+
 static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 {
 	if (!adapter.show_playback_status)
@@ -815,8 +884,11 @@ static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 						? metrics.current_frame - metrics.confirmed_frame_count
 						: 0;
 				message += " confirm_lag=" + std::to_string(confirm_lag);
-				message += " rollbacks=" + std::to_string(metrics.rollback_count);
-				message += " max=" + std::to_string(metrics.max_rollback_frames);
+				if (adapter.show_rollback_stats)
+				{
+					message += " rollbacks=" + std::to_string(metrics.rollback_count);
+					message += " max=" + std::to_string(metrics.max_rollback_frames);
+				}
 			}
 		}
 	}
@@ -909,11 +981,15 @@ bool kaileron_adapter::initialize()
 	m_impl->player_count = player_count;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
-	m_impl->show_playback_status = std::strcmp(env_value("KN_MAME_STATUS", "1"), "0") != 0;
+	m_impl->show_playback_status = env_enabled("KN_MAME_STATUS");
+	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
-	m_impl->frame_duration_us = frame_duration_us(m_impl->machine);
+	u32 const override_frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
+	m_impl->frame_duration_us = override_frame_ms > 0
+			? override_frame_ms * 1000
+			: frame_duration_us(m_impl->machine);
 
 	KnCallbacks callbacks = {};
 	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
@@ -930,6 +1006,7 @@ bool kaileron_adapter::initialize()
 	if (std::strcmp(env_value("KN_MAME_STATE_HASH", "1"), "0") != 0)
 		callbacks.state_hash = kn_mame_state_hash;
 	callbacks.set_playback_control = kn_mame_set_playback_control;
+	callbacks.on_lifecycle_event = kn_mame_on_lifecycle_event;
 
 	KnConfig config = {};
 	if (m_impl->kn_config_init(&config) != KN_OK)
@@ -986,10 +1063,8 @@ bool kaileron_adapter::tick()
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
 
-	KnMetrics before_metrics = {};
-	bool const had_before_metrics = m_impl->networked && m_impl->kn_host_session_get_metrics &&
-			m_impl->kn_host_session_get_metrics(m_impl->session, &before_metrics) == KN_OK;
 	m_impl->hide_replay_video = false;
+	m_impl->sdk_pace_delay_us = 0;
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
 	m_impl->hide_replay_video = false;
 	if (result != KN_OK)
@@ -1000,65 +1075,8 @@ bool kaileron_adapter::tick()
 	else
 	{
 		update_playback_status_overlay(*m_impl);
-	}
-	if (result == KN_OK && m_impl->networked)
-	{
-		KnMetrics metrics = {};
-		if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
-		{
-			u32 const override_frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
-			u32 const frame_us = override_frame_ms > 0
-					? override_frame_ms * 1000
-					: (m_impl->frame_duration_us > 0 ? m_impl->frame_duration_us : 16667);
-			u32 const playback_speed_factor = m_impl->sdk_playback_override
-					? std::max<u32>(m_impl->sdk_playback_speed_factor, 1000)
-					: 1000;
-			u64 const paced_frame_us = std::max<u64>(1, (u64(frame_us) * 1000) / playback_speed_factor);
-			bool const uncapped_catchup = m_impl->sdk_playback_override && playback_speed_factor >= 128000;
-			if (metrics.current_frame == 0 ||
-					(had_before_metrics && metrics.current_frame == before_metrics.current_frame))
-			{
-				if (!uncapped_catchup)
-					std::this_thread::sleep_for(std::chrono::microseconds(paced_frame_us));
-			}
-
-			if (metrics.current_frame > m_impl->last_paced_frame)
-			{
-				auto now = std::chrono::steady_clock::now();
-				if (m_impl->next_frame_at.time_since_epoch().count() == 0)
-					m_impl->next_frame_at = now;
-				u32 advanced = metrics.current_frame - m_impl->last_paced_frame;
-				m_impl->next_frame_at += std::chrono::microseconds(paced_frame_us * advanced);
-				if (!uncapped_catchup && now < m_impl->next_frame_at)
-					std::this_thread::sleep_until(m_impl->next_frame_at);
-				else if (now - m_impl->next_frame_at > std::chrono::milliseconds(250))
-					m_impl->next_frame_at = now;
-				m_impl->last_paced_frame = metrics.current_frame;
-			}
-
-			u32 const target_prediction = env_u32("KN_TARGET_PREDICTION", 2);
-			u32 const prediction_lead = metrics.current_frame > metrics.confirmed_frame_count
-					? metrics.current_frame - metrics.confirmed_frame_count
-					: 0;
-			if (target_prediction > 0 && prediction_lead > target_prediction)
-			{
-				u32 const extra_frames = std::min<u32>(prediction_lead - target_prediction, 4);
-				if (!uncapped_catchup)
-					std::this_thread::sleep_for(std::chrono::microseconds(paced_frame_us * extra_frames));
-			}
-		}
-		else if (m_impl->spectator)
-		{
-			KnPlaybackControl control = {};
-			control.target_speed_percent = 100;
-			apply_playback_control(*m_impl, control);
-		}
-	}
-	else if (m_impl->spectator)
-	{
-		KnPlaybackControl control = {};
-		control.target_speed_percent = 100;
-		apply_playback_control(*m_impl, control);
+		if (m_impl->networked && m_impl->sdk_pace_delay_us > 0)
+			std::this_thread::sleep_for(std::chrono::microseconds(m_impl->sdk_pace_delay_us));
 	}
 	return true;
 }
