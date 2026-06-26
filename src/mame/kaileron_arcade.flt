@@ -1,0 +1,235 @@
+// Kaileron managed arcade profile.
+//
+// Bootstrapped from HBMAME's hbmame.lst, then maintained as a committed
+// source filter.  Do not regenerate this file during normal builds.
+//
+// HBMAME-only driver files are intentionally skipped; this filter keeps
+// the bundle on official MAME sources while reusing HBMAME's compact
+// arcade-oriented source selection.
+// Some skipped HBMAME split sources are covered by official aggregate sources
+// such as neogeo/neogeo.cpp and pacman/pacman.cpp.
+
+"atari/asteroid.cpp"
+"atari/atarigt.cpp"
+"atari/atarisy1.cpp"
+"atari/bwidow.cpp"
+"atari/bzone.cpp"
+"atari/cball.cpp"
+"atari/centiped.cpp"
+"atari/gauntlet.cpp"
+"atari/mhavoc.cpp"
+"atari/missile.cpp"
+"atari/tempest.cpp"
+"atlus/cave.cpp"
+"capcom/1942.cpp"
+"capcom/1943.cpp"
+"capcom/blktiger.cpp"
+"capcom/commando.cpp"
+"capcom/cps1.cpp"
+"capcom/cps1bl_5205.cpp"
+"capcom/cps2.cpp"
+"capcom/cps3.cpp"
+"capcom/fcrash.cpp"
+"capcom/gng.cpp"
+"capcom/mitchell.cpp"
+"capcom/sf.cpp"
+"capcom/sonson.cpp"
+"cave/cv1k.cpp"
+"cinematronics/cinemat.cpp"
+"dataeast/astrof.cpp"
+"dataeast/btime.cpp"
+"dataeast/cninja.cpp"
+"dataeast/dec0.cpp"
+"dataeast/deco32.cpp"
+"dataeast/deco_mlc.cpp"
+"dataeast/decocass.cpp"
+"dataeast/pcktgal.cpp"
+"dataeast/rohga.cpp"
+"dataeast/sidepckt.cpp"
+"dynax/ddenlovr.cpp"
+"dynax/dynax.cpp"
+"exidy/exidy.cpp"
+"fuuki/fuukifg3.cpp"
+"galaxian/galaxian.cpp"
+"galaxian/scramble.cpp"
+"gottlieb/gottlieb.cpp"
+"handheld/hh_sm510.cpp"
+"ice/skimaxx.cpp"
+"igs/igs011.cpp"
+"igs/lordgun.cpp"
+"igs/pgm.cpp"
+"irem/m52.cpp"
+"irem/m92.cpp"
+"itech/itech8.cpp"
+"jaleco/exerion.cpp"
+"jaleco/ginganin.cpp"
+"jaleco/megasys1.cpp"
+"kaneko/kaneko16.cpp"
+"kaneko/snowbros.cpp"
+"konami/blockhl.cpp"
+"konami/contra.cpp"
+"konami/dbz.cpp"
+"konami/gradius3.cpp"
+"konami/gyruss.cpp"
+"konami/hyperspt.cpp"
+"konami/konamigx.cpp"
+"konami/mystwarr.cpp"
+"konami/nemesis.cpp"
+"konami/pooyan.cpp"
+"konami/shaolins.cpp"
+"konami/timeplt.cpp"
+"konami/tmnt.cpp"
+"konami/trackfld.cpp"
+"konami/twin16.cpp"
+"konami/yiear.cpp"
+"metro/rabbit.cpp"
+"midw8080/8080bw.cpp"
+"midway/astrocde.cpp"
+"midway/mcr.cpp"
+"midway/mcr3.cpp"
+"midway/midtunit.cpp"
+"midway/midwunit.cpp"
+"midway/midyunit.cpp"
+"midway/williams.cpp"
+"midway/wmg.cpp"
+"misc/mcatadv.cpp"
+"misc/vamphalf.cpp"
+"namco/galaga.cpp"
+"namco/mappy.cpp"
+"namco/namcona1.cpp"
+"namco/namcos2.cpp"
+"namco/namcos86.cpp"
+"namco/pacland.cpp"
+"namco/polepos.cpp"
+"namco/rallyx.cpp"
+"neogeo/neogeo.cpp"
+"nichibutsu/cclimber.cpp"
+"nichibutsu/terracre.cpp"
+"nintendo/dkong.cpp"
+"nintendo/mario.cpp"
+"nintendo/playch10.cpp"
+"nintendo/snesb.cpp"
+"nintendo/vsnes.cpp"
+"nmk/nmk16.cpp"
+"orca/kyugo.cpp"
+"pacman/pacman.cpp"
+"pacman/jrpacman.cpp"
+"pacman/pengo.cpp"
+"phoenix/phoenix.cpp"
+"psikyo/psikyo.cpp"
+"psikyo/psikyosh.cpp"
+"sega/dotrikun.cpp"
+"sega/model1.cpp"
+"sega/model2.cpp"
+"sega/segac2.cpp"
+"sega/segag80r.cpp"
+"sega/segahang.cpp"
+"sega/segaorun.cpp"
+"sega/segas16b.cpp"
+"sega/segas24.cpp"
+"sega/segas32.cpp"
+"sega/segaxbd.cpp"
+"sega/stv.cpp"
+"sega/system1.cpp"
+"sega/system16.cpp"
+"seibu/bloodbro.cpp"
+"seibu/cabal.cpp"
+"seibu/mustache.cpp"
+"seibu/r2dx_v33.cpp"
+"seibu/raiden2.cpp"
+"seibu/toki.cpp"
+"seibu/wiz.cpp"
+"seta/seta.cpp"
+"seta/seta2.cpp"
+"seta/simple_st0016.cpp"
+"seta/ssv.cpp"
+"snk/snk6502.cpp"
+"sony/zn.cpp"
+"taito/arkanoid.cpp"
+"taito/asuka.cpp"
+"taito/bublbobl.cpp"
+"taito/flstory.cpp"
+"taito/kikikai.cpp"
+"taito/lkage.cpp"
+"taito/rastan.cpp"
+"taito/retofinv.cpp"
+"taito/taito_b.cpp"
+"taito/taito_f2.cpp"
+"taito/taito_f3.cpp"
+"taito/taito_l.cpp"
+"taito/taito_z.cpp"
+"taito/taitosj.cpp"
+"taito/tnzs.cpp"
+"taito/volfied.cpp"
+"taito/warriorb.cpp"
+"technos/ddragon.cpp"
+"technos/ddragon3.cpp"
+"technos/shadfrce.cpp"
+"technos/wwfsstar.cpp"
+"tecmo/bombjack.cpp"
+"tecmo/solomon.cpp"
+"tecmo/tecmo.cpp"
+"tecmo/tecmo16.cpp"
+"tecmo/tecmosys.cpp"
+"tecmo/tehkanwc.cpp"
+"tecmo/wc90.cpp"
+"toaplan/dt7.cpp"
+"toaplan/twincobr.cpp"
+"unico/silkroad.cpp"
+"universal/docastle.cpp"
+"universal/mrdo.cpp"
+"valadon/bagman.cpp"
+"vsystem/pspikes.cpp"
+"vsystem/taotaido.cpp"
+
+// Skipped HBMAME-only or unresolved sources:
+// - claybust.cpp
+// - cps1mis.cpp
+// - cps2mis.cpp
+// - cps2t.cpp
+// - galactic.cpp
+// - iq_pgm.cpp
+// - kof2000.cpp
+// - kof2001.cpp
+// - kof2002.cpp
+// - kof2003.cpp
+// - kof94.cpp
+// - kof95.cpp
+// - kof96.cpp
+// - kof97.cpp
+// - kof98.cpp
+// - kof99.cpp
+// - maketrax.cpp
+// - mgd2.cpp
+// - mhavoc_hb.cpp
+// - monaco.cpp
+// - mslug.cpp
+// - mslug2.cpp
+// - mslug3.cpp
+// - mslug4.cpp
+// - mslug5.cpp
+// - mslug6.cpp
+// - mslugx.cpp
+// - mspacman.cpp
+// - multipac.cpp
+// - neogeo1.cpp
+// - neogeohb.cpp
+// - ngdoubledr.cpp
+// - nggaroup.cpp
+// - ngkofmisc.cpp
+// - nglastblade.cpp
+// - ngrbff.cpp
+// - ngrotd.cpp
+// - ngsamsho.cpp
+// - ngsengoku.cpp
+// - ngsvc.cpp
+// - ngwh.cpp
+// - powerins.cpp
+// - puckman.cpp
+// - sagas18.cpp
+// - schaser.cpp
+// - sflush.cpp
+// - skylove.cpp
+// - spcenctr.cpp
+// - timelimit.cpp
+// - toaplan2.cpp
