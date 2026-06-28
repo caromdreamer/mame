@@ -1997,6 +1997,14 @@ void psxcpu_device::device_start()
 
 void psxcpu_device::device_reset()
 {
+	std::fill(std::begin(m_r), std::end(m_r), 0);
+	std::fill(std::begin(m_cp0r), std::end(m_cp0r), 0);
+	std::fill(std::begin(m_icacheTag), std::end(m_icacheTag), 0);
+	std::fill(std::begin(m_icache), std::end(m_icache), 0);
+	std::fill(std::begin(m_dcache), std::end(m_dcache), 0);
+	std::fill(std::begin(m_gte.m_cp2cr), std::end(m_gte.m_cp2cr), PAIR { 0 });
+	std::fill(std::begin(m_gte.m_cp2dr), std::end(m_gte.m_cp2dr), PAIR { 0 });
+
 	m_ram_config = 0x800;
 	update_ram_config();
 
@@ -2008,12 +2016,20 @@ void psxcpu_device::device_reset()
 	psxdma->m_ram = (uint32_t *)m_ram->pointer();
 	psxdma->m_ramsize = m_ram->size();
 
+	m_op = 0;
+	m_pc = 0;
+	m_hi = 0;
+	m_lo = 0;
 	m_delayr = 0;
 	m_delayv = 0;
 	m_berr = 0;
 	m_biu = 0;
 
 	m_multiplier_operation = MULTIPLIER_OPERATION_IDLE;
+	m_multiplier_operand1 = 0;
+	m_multiplier_operand2 = 0;
+	m_exp_base = 0;
+	m_exp_config = 0;
 
 	m_r[ 0 ] = 0;
 

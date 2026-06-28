@@ -106,6 +106,7 @@
 "namco/galaga.cpp"
 "namco/mappy.cpp"
 "namco/namcona1.cpp"
+"namco/namcos12.cpp"
 "namco/namcos2.cpp"
 "namco/namcos86.cpp"
 "namco/pacland.cpp"

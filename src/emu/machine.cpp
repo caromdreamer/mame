@@ -38,6 +38,7 @@
 #include <rapidjson/writer.h>
 #include <rapidjson/stringbuffer.h>
 
+#include <cstdlib>
 #include <ctime>
 
 #if defined(__EMSCRIPTEN__)
@@ -169,6 +170,16 @@ void running_machine::start()
 	time_t newbase = m_ioport.initialize();
 	if (newbase != 0)
 		m_base_time = newbase;
+	if (const char *kn_fixed_time = std::getenv("KN_MAME_FIXED_TIME"); kn_fixed_time && kn_fixed_time[0])
+	{
+		char *end = nullptr;
+		long long const fixed_time = std::strtoll(kn_fixed_time, &end, 10);
+		if (end && end != kn_fixed_time)
+		{
+			m_base_time = time_t(fixed_time);
+			osd_printf_info("Kaileron: fixed MAME base time=%lld\n", fixed_time);
+		}
+	}
 
 	// initialize natural keyboard support after ports have been initialized
 	m_natkeyboard = std::make_unique<natural_keyboard>(*this);
@@ -841,8 +852,12 @@ void running_machine::current_datetime(system_time &systime)
 void running_machine::set_rtc_datetime(const system_time &systime)
 {
 	for (device_rtc_interface &rtc : rtc_interface_enumerator(root_device()))
+	{
+		if (std::getenv("KN_MAME_FIXED_TIME"))
+			rtc.set_use_utc(true);
 		if (rtc.has_battery())
 			rtc.set_current_time(systime);
+	}
 }
 
 
