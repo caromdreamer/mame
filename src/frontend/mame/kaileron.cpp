@@ -85,12 +85,6 @@ u32 env_u32(const char *name, u32 fallback)
 	return u32(parsed);
 }
 
-bool env_present(const char *name)
-{
-	const char *value = std::getenv(name);
-	return value && value[0];
-}
-
 u64 env_u64(const char *name, u64 fallback)
 {
 	const char *value = std::getenv(name);
@@ -1025,10 +1019,6 @@ bool kaileron_adapter::initialize()
 	config.input_size = input_size_env_is_auto() ? 0 : input_size;
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
-	u32 const default_max_prediction = server[0] ? std::max<u32>(config.input_delay_frames, 1) : 0;
-	config.max_prediction_frames = env_present("KN_MAX_PREDICTION")
-		? env_u32("KN_MAX_PREDICTION", default_max_prediction)
-		: default_max_prediction;
 	config.frame_duration_us = m_impl->frame_duration_us;
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
