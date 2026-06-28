@@ -65,6 +65,13 @@ constexpr u32 KN_SLOT_SERVICE1 = 14;
 constexpr u32 KN_SLOT_BUTTON_EXTENSION_BASE = 16;
 constexpr u32 KN_SLOT_SERVICE_EXTENSION_BASE = KN_SLOT_BUTTON_EXTENSION_BASE + 9;
 
+enum class socd_mode
+{
+	off,
+	neutral,
+	up_priority,
+};
+
 const char *env_value(const char *name, const char *fallback)
 {
 	const char *value = std::getenv(name);
@@ -119,6 +126,36 @@ bool env_enabled(const char *name)
 	return value && value[0] && std::strcmp(value, "0");
 }
 
+socd_mode parse_socd_mode(const char *value)
+{
+	if (!value || !value[0] ||
+			!std::strcmp(value, "up_priority") ||
+			!std::strcmp(value, "up") ||
+			!std::strcmp(value, "up_wins"))
+		return socd_mode::up_priority;
+	if (!std::strcmp(value, "neutral"))
+		return socd_mode::neutral;
+	if (!std::strcmp(value, "off") || !std::strcmp(value, "none") || !std::strcmp(value, "raw"))
+		return socd_mode::off;
+
+	osd_printf_error("Kaileron: unsupported KN_SOCD_MODE=%s; using up_priority\n", value);
+	return socd_mode::up_priority;
+}
+
+const char *socd_mode_name(socd_mode mode)
+{
+	switch (mode)
+	{
+	case socd_mode::off:
+		return "off";
+	case socd_mode::neutral:
+		return "neutral";
+	case socd_mode::up_priority:
+	default:
+		return "up_priority";
+	}
+}
+
 void show_kaileron_status(running_machine &machine, const std::string &message)
 {
 	osd_printf_info("%s\n", message.c_str());
@@ -145,6 +182,23 @@ static void set_input_slot(u8 *bytes, u32 len, u32 slot)
 	input_slot(slot, byte, bit);
 	if (bytes && byte < len)
 		bytes[byte] |= bit;
+}
+
+static bool input_slot_pressed(const u8 *bytes, u32 len, u32 slot)
+{
+	u32 byte = 0;
+	u8 bit = 0;
+	input_slot(slot, byte, bit);
+	return bytes && byte < len && (bytes[byte] & bit);
+}
+
+static void clear_input_slot(u8 *bytes, u32 len, u32 slot)
+{
+	u32 byte = 0;
+	u8 bit = 0;
+	input_slot(slot, byte, bit);
+	if (bytes && byte < len)
+		bytes[byte] &= u8(~bit);
 }
 
 static u32 button_slot(u32 button)
@@ -300,6 +354,7 @@ struct kaileron_adapter::impl
 	u32 sdk_playback_speed_factor = 1000;
 	u32 sdk_render_interval = 1;
 	u32 sdk_pace_delay_us = 0;
+	socd_mode local_socd_mode = socd_mode::up_priority;
 	bool sdk_playback_override = false;
 	bool hide_replay_video = false;
 	bool show_playback_status = false;
@@ -461,6 +516,11 @@ static void build_input_map(kaileron_adapter::impl &adapter)
 	}
 
 	adapter.input_map_built = true;
+	if (env_enabled("KN_MAME_APPLY_INPUT"))
+	{
+		for (mapped_input_field const &mapped : adapter.input_map)
+			set_field(mapped.field, false);
+	}
 	if (adapter.trace)
 		osd_printf_info("Kaileron trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
 	if (env_enabled("KN_MAME_DUMP_INPUT_MAP"))
@@ -546,6 +606,29 @@ static void set_input_bit(u8 *bytes, u32 len, u32 byte, u8 bit)
 		bytes[byte] |= bit;
 }
 
+static void apply_socd_cleaning(kaileron_adapter::impl &adapter, u8 *bytes, u32 len)
+{
+	if (adapter.local_socd_mode == socd_mode::off)
+		return;
+
+	if (input_slot_pressed(bytes, len, KN_SLOT_LEFT) && input_slot_pressed(bytes, len, KN_SLOT_RIGHT))
+	{
+		clear_input_slot(bytes, len, KN_SLOT_LEFT);
+		clear_input_slot(bytes, len, KN_SLOT_RIGHT);
+	}
+
+	if (input_slot_pressed(bytes, len, KN_SLOT_UP) && input_slot_pressed(bytes, len, KN_SLOT_DOWN))
+	{
+		if (adapter.local_socd_mode == socd_mode::up_priority)
+			clear_input_slot(bytes, len, KN_SLOT_DOWN);
+		else
+		{
+			clear_input_slot(bytes, len, KN_SLOT_UP);
+			clear_input_slot(bytes, len, KN_SLOT_DOWN);
+		}
+	}
+}
+
 static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len)
 {
 	build_input_map(adapter);
@@ -558,6 +641,7 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 		if ((mapped.owner_only || mapped.player == source_player) && field_pressed(adapter.machine, mapped.field))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
+	apply_socd_cleaning(adapter, bytes, len);
 }
 
 static bool input_bit_pressed(KnInput const &input, mapped_input_field const &mapped)
@@ -578,6 +662,28 @@ static bool mapped_input_pressed(const KnInput *players, u32 player_count, mappe
 	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
 }
 
+static std::vector<KnInput> cleaned_player_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count, std::vector<std::vector<u8>> &storage)
+{
+	std::vector<KnInput> cleaned;
+	if (!players || player_count == 0)
+		return cleaned;
+
+	cleaned.reserve(player_count);
+	storage.reserve(player_count);
+	for (u32 player = 0; player < player_count; player++)
+	{
+		KnInput input = players[player];
+		if (input.bytes && input.len > 0)
+		{
+			storage.emplace_back(input.bytes, input.bytes + input.len);
+			apply_socd_cleaning(adapter, storage.back().data(), input.len);
+			input.bytes = storage.back().data();
+		}
+		cleaned.push_back(input);
+	}
+	return cleaned;
+}
+
 static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count)
 {
 	bool apply_to_mame = env_enabled("KN_MAME_APPLY_INPUT");
@@ -592,11 +698,15 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 		return;
 	}
 
+	std::vector<std::vector<u8>> cleaned_storage;
+	std::vector<KnInput> cleaned_inputs = cleaned_player_inputs(adapter, players, player_count, cleaned_storage);
+	const KnInput *canonical_players = cleaned_inputs.empty() ? players : cleaned_inputs.data();
+
 	for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
 	{
 		u8 input = 0;
-		if (players && players[player].bytes && players[player].len > 0)
-			input = players[player].bytes[0];
+		if (canonical_players && canonical_players[player].bytes && canonical_players[player].len > 0)
+			input = canonical_players[player].bytes[0];
 		if (input)
 			adapter.nonneutral_input_count++;
 		if (adapter.trace && player < 2 && input != adapter.last_applied_input[player])
@@ -610,7 +720,7 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 	if (apply_to_mame)
 	{
 		for (mapped_input_field &mapped : adapter.input_map)
-			set_field(mapped.field, mapped_input_pressed(players, player_count, mapped));
+			set_field(mapped.field, mapped_input_pressed(canonical_players, player_count, mapped));
 		sync_programmatic_inputs(adapter);
 	}
 	adapter.injected_frame_count++;
@@ -977,6 +1087,9 @@ bool kaileron_adapter::initialize()
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
 	m_impl->show_playback_status = env_enabled("KN_MAME_STATUS");
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
+	m_impl->local_socd_mode = parse_socd_mode(env_value("KN_SOCD_MODE", "up_priority"));
+	if (m_impl->trace)
+		osd_printf_info("Kaileron trace: SOCD mode=%s\n", socd_mode_name(m_impl->local_socd_mode));
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
