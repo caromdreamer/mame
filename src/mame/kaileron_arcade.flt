@@ -190,6 +190,7 @@
 "universal/mrdo.cpp"
 "valadon/bagman.cpp"
 "vsystem/pspikes.cpp"
+"vsystem/suprslam.cpp"
 "vsystem/taotaido.cpp"
 
 // Skipped HBMAME-only or unresolved sources:
