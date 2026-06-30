@@ -300,7 +300,6 @@ struct mapped_input_field
 	u32 byte;
 	u8 bit;
 	bool owner_only;
-	bool injected_pressed;
 };
 
 } // namespace
@@ -399,31 +398,24 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 	adapter.sdk_playback_override = enabled;
 }
 
-static void set_field(ioport_field *field, bool pressed, bool lockout = true)
+static void set_live_field(ioport_field *field, bool pressed)
 {
 	if (!field)
 		return;
-	field->live().lockout = lockout;
-	field->set_value(pressed ? 1 : 0);
+
+	ioport_value &digital = field->port().live().digital;
+	if (pressed)
+		digital |= field->mask();
+	else
+		digital &= ~field->mask();
 }
 
-static bool field_seq_pressed(running_machine &machine, ioport_field *field)
+static bool mapped_live_input_pressed(running_machine &machine, mapped_input_field const &mapped)
 {
-	return field &&
-			field->enabled() &&
+	return mapped.field &&
+			mapped.field->enabled() &&
 			!machine.ui().is_menu_active() &&
-			machine.input().seq_pressed(field->seq());
-}
-
-static bool field_programmatic_pressed(ioport_field *field)
-{
-	return field && field->enabled() && field->digital_value();
-}
-
-static bool mapped_local_input_pressed(running_machine &machine, mapped_input_field const &mapped)
-{
-	return field_seq_pressed(machine, mapped.field) ||
-			(field_programmatic_pressed(mapped.field) && !mapped.injected_pressed);
+			((mapped.field->port().live().digital & mapped.field->mask()) != 0);
 }
 
 static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
@@ -523,16 +515,11 @@ static void build_input_map(kaileron_adapter::impl &adapter)
 				continue;
 			if (field.is_analog())
 				continue;
-			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field), false});
+			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field)});
 		}
 	}
 
 	adapter.input_map_built = true;
-	if (env_enabled("KN_MAME_APPLY_INPUT"))
-	{
-		for (mapped_input_field const &mapped : adapter.input_map)
-			set_field(mapped.field, false);
-	}
 	if (adapter.trace)
 		osd_printf_info("Kaileron trace: mapped_input_fields=%u\n", u32(adapter.input_map.size()));
 	if (env_enabled("KN_MAME_DUMP_INPUT_MAP"))
@@ -606,12 +593,6 @@ static u32 frame_duration_us(running_machine &machine)
 	return microseconds > 0xffffffffULL ? 0 : u32(microseconds);
 }
 
-static void sync_programmatic_inputs(kaileron_adapter::impl &adapter)
-{
-	for (auto &port : adapter.machine.ioport().ports())
-		port.second->frame_update();
-}
-
 static void set_input_bit(u8 *bytes, u32 len, u32 byte, u8 bit)
 {
 	if (bytes && byte < len)
@@ -650,7 +631,7 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	{
 		if (mapped.owner_only && adapter.player_id != 0)
 			continue;
-		if ((mapped.owner_only || mapped.player == source_player) && mapped_local_input_pressed(adapter.machine, mapped))
+		if ((mapped.owner_only || mapped.player == source_player) && mapped_live_input_pressed(adapter.machine, mapped))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
 	apply_socd_cleaning(adapter, bytes, len);
@@ -734,10 +715,8 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 		for (mapped_input_field &mapped : adapter.input_map)
 		{
 			bool const pressed = mapped_input_pressed(canonical_players, player_count, mapped);
-			mapped.injected_pressed = pressed;
-			set_field(mapped.field, pressed);
+			set_live_field(mapped.field, pressed);
 		}
-		sync_programmatic_inputs(adapter);
 	}
 	adapter.injected_frame_count++;
 }

@@ -43,8 +43,20 @@
 #include "dipty.h"
 #include "emuopts.h"
 
+#include <cstdlib>
+
 
 namespace ui {
+
+namespace {
+
+bool kaileron_netplay_ui_locked()
+{
+	char const *value = std::getenv("KN_MAME");
+	return value && value[0] && value[0] != '0';
+}
+
+}
 
 enum : unsigned {
 	INPUT_OPTIONS,
@@ -204,7 +216,8 @@ void menu_main::populate()
 	}
 	else
 	{
-		item_append(_("menu-main", "Select New System"), 0, (void *)SELECT_GAME);
+		if (!kaileron_netplay_ui_locked())
+			item_append(_("menu-main", "Select New System"), 0, (void *)SELECT_GAME);
 		item_append(_("menu-main", "Close Menu"), 0, (void *)DISMISS);
 	}
 }
@@ -294,6 +307,8 @@ bool menu_main::handle(event const *ev)
 			break;
 
 		case SELECT_GAME:
+			if (kaileron_netplay_ui_locked())
+				break;
 			if (machine().options().ui() == emu_options::UI_SIMPLE)
 				menu::stack_push<simple_menu_select_game>(ui(), target(), nullptr);
 			else
