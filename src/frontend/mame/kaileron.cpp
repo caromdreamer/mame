@@ -418,6 +418,37 @@ static bool mapped_live_input_pressed(running_machine &machine, mapped_input_fie
 			((mapped.field->port().live().digital & mapped.field->mask()) != 0);
 }
 
+static bool mapped_raw_input_pressed(running_machine &machine, mapped_input_field const &mapped)
+{
+	return mapped.field &&
+			mapped.field->enabled() &&
+			!machine.ui().is_menu_active() &&
+			machine.input().seq_pressed(mapped.field->seq());
+}
+
+static bool mapped_slot(mapped_input_field const &mapped, u32 slot)
+{
+	u32 byte = 0;
+	u8 bit = 0;
+	input_slot(slot, byte, bit);
+	return mapped.byte == byte && mapped.bit == bit;
+}
+
+static bool mapped_direction_field(mapped_input_field const &mapped)
+{
+	return mapped_slot(mapped, KN_SLOT_UP) ||
+			mapped_slot(mapped, KN_SLOT_DOWN) ||
+			mapped_slot(mapped, KN_SLOT_LEFT) ||
+			mapped_slot(mapped, KN_SLOT_RIGHT);
+}
+
+static bool mapped_local_input_pressed(running_machine &machine, mapped_input_field const &mapped)
+{
+	return mapped_direction_field(mapped) ?
+			mapped_raw_input_pressed(machine, mapped) :
+			mapped_live_input_pressed(machine, mapped);
+}
+
 static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
 {
 	switch (field.type())
@@ -631,7 +662,7 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	{
 		if (mapped.owner_only && adapter.player_id != 0)
 			continue;
-		if ((mapped.owner_only || mapped.player == source_player) && mapped_live_input_pressed(adapter.machine, mapped))
+		if ((mapped.owner_only || mapped.player == source_player) && mapped_local_input_pressed(adapter.machine, mapped))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
 	apply_socd_cleaning(adapter, bytes, len);
