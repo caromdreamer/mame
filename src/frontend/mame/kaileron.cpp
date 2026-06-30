@@ -300,6 +300,7 @@ struct mapped_input_field
 	u32 byte;
 	u8 bit;
 	bool owner_only;
+	bool injected_pressed;
 };
 
 } // namespace
@@ -406,12 +407,23 @@ static void set_field(ioport_field *field, bool pressed, bool lockout = true)
 	field->set_value(pressed ? 1 : 0);
 }
 
-static bool field_pressed(running_machine &machine, ioport_field *field)
+static bool field_seq_pressed(running_machine &machine, ioport_field *field)
 {
 	return field &&
 			field->enabled() &&
 			!machine.ui().is_menu_active() &&
 			machine.input().seq_pressed(field->seq());
+}
+
+static bool field_programmatic_pressed(ioport_field *field)
+{
+	return field && field->enabled() && field->digital_value();
+}
+
+static bool mapped_local_input_pressed(running_machine &machine, mapped_input_field const &mapped)
+{
+	return field_seq_pressed(machine, mapped.field) ||
+			(field_programmatic_pressed(mapped.field) && !mapped.injected_pressed);
 }
 
 static bool field_mapping(ioport_field &field, u32 &byte, u8 &bit)
@@ -511,7 +523,7 @@ static void build_input_map(kaileron_adapter::impl &adapter)
 				continue;
 			if (field.is_analog())
 				continue;
-			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field)});
+			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field), false});
 		}
 	}
 
@@ -638,7 +650,7 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	{
 		if (mapped.owner_only && adapter.player_id != 0)
 			continue;
-		if ((mapped.owner_only || mapped.player == source_player) && field_pressed(adapter.machine, mapped.field))
+		if ((mapped.owner_only || mapped.player == source_player) && mapped_local_input_pressed(adapter.machine, mapped))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
 	apply_socd_cleaning(adapter, bytes, len);
@@ -720,7 +732,11 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 	if (apply_to_mame)
 	{
 		for (mapped_input_field &mapped : adapter.input_map)
-			set_field(mapped.field, mapped_input_pressed(canonical_players, player_count, mapped));
+		{
+			bool const pressed = mapped_input_pressed(canonical_players, player_count, mapped);
+			mapped.injected_pressed = pressed;
+			set_field(mapped.field, pressed);
+		}
 		sync_programmatic_inputs(adapter);
 	}
 	adapter.injected_frame_count++;
