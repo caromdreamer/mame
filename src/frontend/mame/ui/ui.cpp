@@ -66,6 +66,25 @@ bool kaileron_netplay_ui_locked()
 	return value && value[0] && value[0] != '0';
 }
 
+bool kaileron_netplay_ui_allowed(bool locked, ioport_type action)
+{
+	if (!locked)
+		return true;
+
+	switch (action)
+	{
+	case IPT_UI_ON_SCREEN_DISPLAY:
+	case IPT_UI_SNAPSHOT:
+	case IPT_UI_RECORD_MNG:
+	case IPT_UI_RECORD_AVI:
+	case IPT_UI_SHOW_PROFILER:
+	case IPT_UI_SHOW_FPS:
+		return true;
+	default:
+		return false;
+	}
+}
+
 }
 
 // list of natural keyboard keys that are not associated with UI_EVENT_CHARs
@@ -1684,7 +1703,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	if (has_keyboard)
 	{
 		// are we toggling the UI with ScrLk?
-		if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_TOGGLE_UI))
+		if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_TOGGLE_UI) && machine().ui_input().pressed(IPT_UI_TOGGLE_UI))
 		{
 			// toggle the UI
 			set_ui_active(!ui_active());
@@ -1727,7 +1746,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	if (!ui_disabled)
 	{
 		// paste command
-		if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_PASTE))
+		if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_PASTE) && machine().ui_input().pressed(IPT_UI_PASTE))
 			machine().natkeyboard().paste();
 	}
 
@@ -1758,7 +1777,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// if the on-screen display isn't up and the user has toggled it, turn it on
-	if (!netplay_ui_locked && !get_slider_list().empty() && !(machine().debug_flags & DEBUG_FLAG_ENABLED) && machine().ui_input().pressed(IPT_UI_ON_SCREEN_DISPLAY))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_ON_SCREEN_DISPLAY) && !get_slider_list().empty() && !(machine().debug_flags & DEBUG_FLAG_ENABLED) && machine().ui_input().pressed(IPT_UI_ON_SCREEN_DISPLAY))
 	{
 		m_ui_target = &current_ui_target();
 		ui::menu::stack_push<ui::menu_sliders>(*this, *m_ui_target, true);
@@ -1767,13 +1786,13 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// handle a reset request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_RESET_MACHINE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_RESET_MACHINE) && machine().ui_input().pressed(IPT_UI_RESET_MACHINE))
 		machine().schedule_hard_reset();
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SOFT_RESET))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SOFT_RESET) && machine().ui_input().pressed(IPT_UI_SOFT_RESET))
 		machine().schedule_soft_reset();
 
 	// handle a request to display graphics/palette
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SHOW_GFX))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SHOW_GFX) && machine().ui_input().pressed(IPT_UI_SHOW_GFX))
 	{
 		for (auto *target = machine().render().first_target(); target; target = target->next())
 		{
@@ -1794,7 +1813,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// handle a tape control key
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_TAPE_START))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_TAPE_START) && machine().ui_input().pressed(IPT_UI_TAPE_START))
 	{
 		for (cassette_image_device &cass : cassette_device_enumerator(machine().root_device()))
 		{
@@ -1802,7 +1821,7 @@ uint32_t mame_ui_manager::handler_ingame()
 			return 0;
 		}
 	}
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_TAPE_STOP))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_TAPE_STOP) && machine().ui_input().pressed(IPT_UI_TAPE_STOP))
 	{
 		for (cassette_image_device &cass : cassette_device_enumerator(machine().root_device()))
 		{
@@ -1812,7 +1831,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// handle a save state request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SAVE_STATE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SAVE_STATE) && machine().ui_input().pressed(IPT_UI_SAVE_STATE))
 	{
 		m_ui_target = &current_ui_target();
 		ui::menu::stack_push<ui::menu_save_state>(*this, *m_ui_target, true);
@@ -1821,7 +1840,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// handle a load state request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_LOAD_STATE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_LOAD_STATE) && machine().ui_input().pressed(IPT_UI_LOAD_STATE))
 	{
 		m_ui_target = &current_ui_target();
 		ui::menu::stack_push<ui::menu_load_state>(*this, *m_ui_target, true);
@@ -1830,29 +1849,29 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// handle a quick save state request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SAVE_STATE_QUICK))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SAVE_STATE_QUICK) && machine().ui_input().pressed(IPT_UI_SAVE_STATE_QUICK))
 	{
 		machine().schedule_save("quick");
 		return 0;
 	}
 
 	// handle a quick load state request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_LOAD_STATE_QUICK))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_LOAD_STATE_QUICK) && machine().ui_input().pressed(IPT_UI_LOAD_STATE_QUICK))
 	{
 		machine().schedule_load("quick");
 		return 0;
 	}
 
 	// handle a save snapshot request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SNAPSHOT))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SNAPSHOT) && machine().ui_input().pressed(IPT_UI_SNAPSHOT))
 		machine().video().save_active_screen_snapshots();
 
 	// toggle pause
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_PAUSE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_PAUSE) && machine().ui_input().pressed(IPT_UI_PAUSE))
 		machine().toggle_pause();
 
 	// pause single step
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_PAUSE_SINGLE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_PAUSE_SINGLE) && machine().ui_input().pressed(IPT_UI_PAUSE_SINGLE))
 	{
 		machine().rewind_capture();
 		set_single_step(true);
@@ -1860,43 +1879,43 @@ uint32_t mame_ui_manager::handler_ingame()
 	}
 
 	// rewind single step
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_REWIND_SINGLE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_REWIND_SINGLE) && machine().ui_input().pressed(IPT_UI_REWIND_SINGLE))
 		machine().rewind_step();
 
 	// handle a toggle cheats request
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_TOGGLE_CHEAT))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_TOGGLE_CHEAT) && machine().ui_input().pressed(IPT_UI_TOGGLE_CHEAT))
 		mame_machine_manager::instance()->cheat().set_enable(!mame_machine_manager::instance()->cheat().enabled(), true);
 
 	// toggle MNG recording
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_RECORD_MNG))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_RECORD_MNG) && machine().ui_input().pressed(IPT_UI_RECORD_MNG))
 		machine().video().toggle_record_movie(movie_recording::format::MNG);
 
 	// toggle AVI recording
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_RECORD_AVI))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_RECORD_AVI) && machine().ui_input().pressed(IPT_UI_RECORD_AVI))
 		machine().video().toggle_record_movie(movie_recording::format::AVI);
 
 	// toggle profiler display
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_SHOW_PROFILER))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SHOW_PROFILER) && machine().ui_input().pressed(IPT_UI_SHOW_PROFILER))
 		set_show_profiler(!show_profiler());
 
 	// toggle FPS display
-	if (machine().ui_input().pressed(IPT_UI_SHOW_FPS))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SHOW_FPS) && machine().ui_input().pressed(IPT_UI_SHOW_FPS))
 		set_show_fps(!show_fps());
 
 	// increment frameskip
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_FRAMESKIP_INC))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_FRAMESKIP_INC) && machine().ui_input().pressed(IPT_UI_FRAMESKIP_INC))
 		increase_frameskip();
 
 	// decrement frameskip
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_FRAMESKIP_DEC))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_FRAMESKIP_DEC) && machine().ui_input().pressed(IPT_UI_FRAMESKIP_DEC))
 		decrease_frameskip();
 
 	// toggle throttle
-	if (!netplay_ui_locked && machine().ui_input().pressed(IPT_UI_THROTTLE))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_THROTTLE) && machine().ui_input().pressed(IPT_UI_THROTTLE))
 		machine().video().set_throttled(!machine().video().throttled());
 
 	// check for fast forward
-	if (!netplay_ui_locked && machine().ioport().type_pressed(IPT_UI_FAST_FORWARD))
+	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_FAST_FORWARD) && machine().ioport().type_pressed(IPT_UI_FAST_FORWARD))
 	{
 		machine().video().set_fastforward(true);
 		show_fps_temp(0.5);
