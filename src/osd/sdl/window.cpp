@@ -966,6 +966,8 @@ int sdl_window_info::complete_create()
 	// show window
 
 	SDL_ShowWindow(platform_window());
+	if (m_startmaximized && !fullscreen())
+		SDL_MaximizeWindow(platform_window());
 	//SDL_SetWindowFullscreen(window->sdl_window(), 0);
 	//SDL_SetWindowFullscreen(window->sdl_window(), window->fullscreen());
 	SDL_RaiseWindow(platform_window());

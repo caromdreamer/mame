@@ -41,7 +41,8 @@ typedef enum KnResult {
   KN_ERR_NETWORK = -2,
   KN_ERR_CALLBACK = -3,
   KN_ERR_NOT_READY = -4,
-  KN_ERR_INTERNAL = -5
+  KN_ERR_INTERNAL = -5,
+  KN_ERR_REPLAY_COMPLETE = -6
 } KnResult;
 
 typedef struct KnInput {

@@ -1280,7 +1280,13 @@ bool kaileron_adapter::tick()
 	m_impl->sdk_pace_delay_us = 0;
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
 	m_impl->hide_replay_video = false;
-	if (result != KN_OK)
+	if (result == KN_ERR_REPLAY_COMPLETE)
+	{
+		osd_printf_info("Kaileron: replay complete\n");
+		show_kaileron_status(m_impl->machine, "Kaileron: replay complete");
+		m_impl->machine.schedule_exit();
+	}
+	else if (result != KN_OK)
 	{
 		osd_printf_error("Kaileron: tick failed result=%d\n", int(result));
 		m_impl->machine.schedule_exit();
