@@ -407,6 +407,11 @@ static void set_live_field(ioport_field *field, bool pressed)
 	if (!field)
 		return;
 
+	if (pressed)
+		field->set_value(1);
+	else
+		field->clear_value();
+
 	ioport_value &digital = field->port().live().digital;
 	if (pressed)
 		digital |= field->mask();
