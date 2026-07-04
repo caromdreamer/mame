@@ -26,6 +26,8 @@
 // standard SDL header
 #include <SDL3/SDL.h>
 
+extern bool g_kn_mame_chat_active;
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -53,6 +55,16 @@
 
 
 namespace osd {
+
+static bool should_suppress_chat_key(SDL_Scancode scancode)
+{
+	return g_kn_mame_chat_active &&
+			(scancode == SDL_SCANCODE_ESCAPE ||
+				scancode == SDL_SCANCODE_RETURN ||
+				scancode == SDL_SCANCODE_RETURN2 ||
+				scancode == SDL_SCANCODE_KP_ENTER ||
+				scancode == SDL_SCANCODE_BACKSPACE);
+}
 
 namespace {
 
@@ -583,6 +595,12 @@ public:
 			{
 				if (event.key.scancode == SDL_SCANCODE_CAPSLOCK)
 					m_capslock_pressed = std::chrono::steady_clock::now();
+
+				if (should_suppress_chat_key(event.key.scancode))
+				{
+					m_keyboard.state[event.key.scancode] = 0x00;
+					break;
+				}
 
 				m_keyboard.state[event.key.scancode] = 0x80;
 			}
