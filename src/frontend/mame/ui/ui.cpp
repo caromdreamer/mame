@@ -77,6 +77,7 @@ bool kaileron_netplay_ui_allowed(bool locked, ioport_type action)
 
 	switch (action)
 	{
+	case IPT_KAILERON_CHAT:
 	case IPT_UI_ON_SCREEN_DISPLAY:
 	case IPT_UI_SNAPSHOT:
 	case IPT_UI_RECORD_MNG:
