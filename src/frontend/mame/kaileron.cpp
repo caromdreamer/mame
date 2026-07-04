@@ -1198,8 +1198,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	if (adapter.chat_outbox_path.empty())
 		return;
 
-	input_code const toggle_code = adapter.machine.input().code_from_itemid(ITEM_ID_F8);
-	if (adapter.machine.input().code_pressed_once(toggle_code))
+	if (adapter.machine.ui_input().pressed(IPT_OSD_9))
 	{
 		adapter.chat_active = !adapter.chat_active;
 		if (adapter.chat_active)
