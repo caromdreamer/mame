@@ -7,6 +7,7 @@
 
 #include "osdepend.h"
 #include "screen.h"
+#include "uiinput.h"
 #include "ui/uimain.h"
 
 #if defined(_WIN32)
@@ -25,6 +26,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -341,12 +344,18 @@ struct kaileron_adapter::impl
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point last_status_at = {};
+	std::chrono::steady_clock::time_point last_chat_poll_at = {};
 	std::vector<mapped_input_field> input_map;
 	std::string last_status_text;
+	std::string chat_inbox_path;
+	std::string chat_outbox_path;
+	std::string chat_text;
+	u64 last_chat_id = 0;
 	bool warned_missing_ports = false;
 	bool input_map_built = false;
 	bool trace = false;
 	bool initialized = false;
+	bool chat_active = false;
 	bool reported_exit = false;
 	bool in_advance = false;
 	bool in_runahead = false;
@@ -425,6 +434,132 @@ static bool mapped_live_input_pressed(running_machine &machine, mapped_input_fie
 			mapped.field->enabled() &&
 			!machine.ui().is_menu_active() &&
 			((mapped.field->port().live().digital & mapped.field->mask()) != 0);
+}
+
+static std::string normalized_chat_line(const std::string &value)
+{
+	std::string out = value;
+	for (char &ch : out)
+		if (ch == '\r' || ch == '\n' || ch == '\t')
+			ch = ' ';
+	return out;
+}
+
+static void append_utf8(std::string &out, char32_t ch)
+{
+	if (ch <= 0x7f)
+		out.push_back(char(ch));
+	else if (ch <= 0x7ff)
+	{
+		out.push_back(char(0xc0 | (ch >> 6)));
+		out.push_back(char(0x80 | (ch & 0x3f)));
+	}
+	else if (ch <= 0xffff)
+	{
+		out.push_back(char(0xe0 | (ch >> 12)));
+		out.push_back(char(0x80 | ((ch >> 6) & 0x3f)));
+		out.push_back(char(0x80 | (ch & 0x3f)));
+	}
+	else
+	{
+		out.push_back(char(0xf0 | (ch >> 18)));
+		out.push_back(char(0x80 | ((ch >> 12) & 0x3f)));
+		out.push_back(char(0x80 | ((ch >> 6) & 0x3f)));
+		out.push_back(char(0x80 | (ch & 0x3f)));
+	}
+}
+
+static void pop_utf8_codepoint(std::string &text)
+{
+	if (text.empty())
+		return;
+	std::size_t pos = text.size() - 1;
+	while (pos > 0 && (u8(text[pos]) & 0xc0) == 0x80)
+		pos--;
+	text.erase(pos);
+}
+
+static void write_chat_outbox(const std::string &path, const std::string &body)
+{
+	if (path.empty() || body.empty())
+		return;
+	std::ofstream file(path, std::ios::app);
+	if (!file)
+		return;
+	file << normalized_chat_line(body) << '\n';
+}
+
+static bool key_pressed_once(running_machine &machine, input_item_id item)
+{
+	return machine.input().code_pressed_once(machine.input().code_from_itemid(item));
+}
+
+static bool key_pressed(running_machine &machine, input_item_id item)
+{
+	return machine.input().code_pressed(machine.input().code_from_itemid(item));
+}
+
+static bool shift_pressed(running_machine &machine)
+{
+	return key_pressed(machine, ITEM_ID_LSHIFT) || key_pressed(machine, ITEM_ID_RSHIFT);
+}
+
+static bool append_raw_chat_key(running_machine &machine, std::string &text)
+{
+	bool const shift = shift_pressed(machine);
+
+	for (int item = ITEM_ID_A; item <= ITEM_ID_Z; item++)
+	{
+		if (key_pressed_once(machine, input_item_id(item)))
+		{
+			char const base = shift ? 'A' : 'a';
+			text.push_back(char(base + (item - ITEM_ID_A)));
+			return true;
+		}
+	}
+
+	static const char normal_digits[] = "0123456789";
+	static const char shifted_digits[] = ")!@#$%^&*(";
+	for (int item = ITEM_ID_0; item <= ITEM_ID_9; item++)
+	{
+		if (key_pressed_once(machine, input_item_id(item)))
+		{
+			int const index = item - ITEM_ID_0;
+			text.push_back(shift ? shifted_digits[index] : normal_digits[index]);
+			return true;
+		}
+	}
+
+	struct key_char
+	{
+		input_item_id item;
+		char normal;
+		char shifted;
+	};
+	static constexpr key_char keys[] = {
+		{ ITEM_ID_SPACE, ' ', ' ' },
+		{ ITEM_ID_MINUS, '-', '_' },
+		{ ITEM_ID_EQUALS, '=', '+' },
+		{ ITEM_ID_OPENBRACE, '[', '{' },
+		{ ITEM_ID_CLOSEBRACE, ']', '}' },
+		{ ITEM_ID_BACKSLASH, '\\', '|' },
+		{ ITEM_ID_COLON, ';', ':' },
+		{ ITEM_ID_QUOTE, '\'', '"' },
+		{ ITEM_ID_COMMA, ',', '<' },
+		{ ITEM_ID_STOP, '.', '>' },
+		{ ITEM_ID_SLASH, '/', '?' },
+		{ ITEM_ID_TILDE, '`', '~' },
+	};
+	for (key_char const &key : keys)
+	{
+		if (key_pressed_once(machine, key.item))
+		{
+			text.push_back(shift ? key.shifted : key.normal);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 static bool mapped_raw_input_pressed(running_machine &machine, mapped_input_field const &mapped)
@@ -965,7 +1100,6 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 		}
 		adapter->runahead_count++;
 	}
-
 	adapter->in_advance = false;
 	if (adapter->trace && adapter->load_count > 0)
 		osd_printf_info("Kaileron trace: advance_frame done frame=%u after mame_frames=%u advances=%u\n", frame, adapter->frame_count, adapter->advance_count);
@@ -1061,9 +1195,166 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		g_kn_mame_status_overlay.clear();
 }
 
+static void poll_chat_inbox(kaileron_adapter::impl &adapter)
+{
+	if (adapter.chat_inbox_path.empty())
+		return;
+
+	auto const now = std::chrono::steady_clock::now();
+	if (adapter.last_chat_poll_at.time_since_epoch().count() != 0 &&
+			now - adapter.last_chat_poll_at < std::chrono::milliseconds(500))
+		return;
+	adapter.last_chat_poll_at = now;
+
+	std::ifstream file(adapter.chat_inbox_path);
+	if (!file)
+		return;
+
+	std::string line;
+	while (std::getline(file, line))
+	{
+		std::istringstream stream(line);
+		std::string id_text;
+		std::string author;
+		std::string body;
+		if (!std::getline(stream, id_text, '\t') ||
+				!std::getline(stream, author, '\t') ||
+				!std::getline(stream, body))
+			continue;
+
+		char *end = nullptr;
+		unsigned long long const id = std::strtoull(id_text.c_str(), &end, 10);
+		if ((end && *end) || id <= adapter.last_chat_id)
+			continue;
+
+		adapter.last_chat_id = id;
+		std::string message = author + ": " + body;
+		adapter.machine.popmessage("%s", message.c_str());
+		g_kn_mame_status_overlay = message;
+		adapter.last_status_text = message;
+	}
+}
+
+static void show_chat_input(kaileron_adapter::impl &adapter)
+{
+	std::string message = "Chat: " + adapter.chat_text;
+	adapter.machine.popmessage("%s", message.c_str());
+	g_kn_mame_status_overlay = message;
+	adapter.last_status_text = message;
+	adapter.last_status_at = std::chrono::steady_clock::now();
+}
+
+static void process_chat_input(kaileron_adapter::impl &adapter)
+{
+	if (adapter.chat_outbox_path.empty())
+		return;
+
+	input_code const toggle_code = adapter.machine.input().code_from_itemid(ITEM_ID_F8);
+	if (adapter.machine.input().code_pressed_once(toggle_code))
+	{
+		adapter.chat_active = !adapter.chat_active;
+		if (adapter.chat_active)
+			adapter.chat_text.clear();
+		show_chat_input(adapter);
+	}
+
+	if (!adapter.chat_active)
+		return;
+
+	if (key_pressed_once(adapter.machine, ITEM_ID_ESC))
+	{
+		adapter.chat_active = false;
+		adapter.chat_text.clear();
+		adapter.machine.popmessage("Chat canceled");
+		g_kn_mame_status_overlay = "Chat canceled";
+		return;
+	}
+	if (key_pressed_once(adapter.machine, ITEM_ID_ENTER) ||
+			key_pressed_once(adapter.machine, ITEM_ID_ENTER_PAD))
+	{
+		std::string body = normalized_chat_line(adapter.chat_text);
+		adapter.chat_active = false;
+		adapter.chat_text.clear();
+		if (!body.empty())
+		{
+			write_chat_outbox(adapter.chat_outbox_path, body);
+			adapter.machine.popmessage("Chat sent: %s", body.c_str());
+			g_kn_mame_status_overlay = "Chat sent: " + body;
+		}
+		else
+		{
+			adapter.machine.popmessage("Chat canceled");
+			g_kn_mame_status_overlay = "Chat canceled";
+		}
+		return;
+	}
+	if (key_pressed_once(adapter.machine, ITEM_ID_BACKSPACE))
+	{
+		pop_utf8_codepoint(adapter.chat_text);
+		show_chat_input(adapter);
+		return;
+	}
+	if (append_raw_chat_key(adapter.machine, adapter.chat_text))
+	{
+		show_chat_input(adapter);
+		return;
+	}
+
+	ui_event event;
+	bool changed = false;
+	while (adapter.machine.ui_input().pop_event(&event))
+	{
+		if (event.event_type != ui_event::type::IME_CHAR)
+			continue;
+
+		if (event.ch == 0x1b)
+		{
+			adapter.chat_active = false;
+			adapter.chat_text.clear();
+			adapter.machine.popmessage("Chat canceled");
+			g_kn_mame_status_overlay = "Chat canceled";
+			return;
+		}
+		if (event.ch == '\r' || event.ch == '\n')
+		{
+			std::string body = normalized_chat_line(adapter.chat_text);
+			adapter.chat_active = false;
+			adapter.chat_text.clear();
+			if (!body.empty())
+			{
+				write_chat_outbox(adapter.chat_outbox_path, body);
+				adapter.machine.popmessage("Chat sent: %s", body.c_str());
+				g_kn_mame_status_overlay = "Chat sent: " + body;
+			}
+			else
+			{
+				adapter.machine.popmessage("Chat canceled");
+				g_kn_mame_status_overlay = "Chat canceled";
+			}
+			return;
+		}
+		if (event.ch == '\b' || event.ch == 0x7f)
+		{
+			pop_utf8_codepoint(adapter.chat_text);
+			changed = true;
+			continue;
+		}
+		if (event.ch >= 0x20 && adapter.chat_text.size() < 160)
+		{
+			append_utf8(adapter.chat_text, event.ch);
+			changed = true;
+		}
+	}
+
+	if (changed)
+		show_chat_input(adapter);
+}
+
 static void update_playback_status_overlay(kaileron_adapter::impl &adapter)
 {
 	if (!adapter.show_playback_status)
+		return;
+	if (adapter.chat_active)
 		return;
 
 	auto const now = std::chrono::steady_clock::now();
@@ -1197,6 +1488,8 @@ bool kaileron_adapter::initialize()
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
 	m_impl->show_playback_status = env_enabled("KN_MAME_STATUS");
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
+	m_impl->chat_inbox_path = env_value("KN_CHAT_INBOX", "");
+	m_impl->chat_outbox_path = env_value("KN_CHAT_OUTBOX", "");
 	m_impl->runahead_frames = m_impl->spectator ? 0 : std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 2);
 	m_impl->local_socd_mode = parse_socd_mode(env_value("KN_SOCD_MODE", "up_priority"));
 	if (m_impl->trace)
@@ -1281,6 +1574,8 @@ bool kaileron_adapter::tick()
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
 
+	poll_chat_inbox(*m_impl);
+	process_chat_input(*m_impl);
 	m_impl->hide_replay_video = false;
 	m_impl->sdk_pace_delay_us = 0;
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
