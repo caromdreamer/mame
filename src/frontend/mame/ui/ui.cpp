@@ -1534,7 +1534,9 @@ void mame_ui_manager::process_ui_events()
 			break;
 
 		case ui_event::type::IME_CHAR:
-			if (use_natkbd)
+			if (g_kn_mame_chat_active)
+				g_kn_mame_chat_pending_chars.push_back(event.ch);
+			else if (use_natkbd)
 				machine().natkeyboard().post_char(event.ch);
 			break;
 		}
