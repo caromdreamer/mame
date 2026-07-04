@@ -937,6 +937,7 @@ int sdl_window_info::complete_create()
 
 	set_platform_window(sdlwindow);
 	renderer_create();
+	SDL_StartTextInput();
 
 	if (fullscreen() && video_config.switchres)
 	{
