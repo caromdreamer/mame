@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 
+extern bool g_kn_mame_chat_active;
 
 namespace {
 
@@ -473,6 +474,11 @@ void sdl_osd_interface::process_events_buf()
 void sdl_osd_interface::process_events()
 {
 	std::lock_guard<std::mutex> lock(subscription_mutex());
+	if (g_kn_mame_chat_active && !SDL_IsTextInputActive())
+		SDL_StartTextInput();
+	else if (!g_kn_mame_chat_active && SDL_IsTextInputActive())
+		SDL_StopTextInput();
+
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{

@@ -527,74 +527,6 @@ static bool key_pressed_once(running_machine &machine, input_item_id item)
 	return machine.input().code_pressed_once(machine.input().code_from_itemid(item));
 }
 
-static bool key_pressed(running_machine &machine, input_item_id item)
-{
-	return machine.input().code_pressed(machine.input().code_from_itemid(item));
-}
-
-static bool shift_pressed(running_machine &machine)
-{
-	return key_pressed(machine, ITEM_ID_LSHIFT) || key_pressed(machine, ITEM_ID_RSHIFT);
-}
-
-static bool append_raw_chat_key(running_machine &machine, std::string &text)
-{
-	bool const shift = shift_pressed(machine);
-
-	for (int item = ITEM_ID_A; item <= ITEM_ID_Z; item++)
-	{
-		if (key_pressed_once(machine, input_item_id(item)))
-		{
-			char const base = shift ? 'A' : 'a';
-			text.push_back(char(base + (item - ITEM_ID_A)));
-			return true;
-		}
-	}
-
-	static const char normal_digits[] = "0123456789";
-	static const char shifted_digits[] = ")!@#$%^&*(";
-	for (int item = ITEM_ID_0; item <= ITEM_ID_9; item++)
-	{
-		if (key_pressed_once(machine, input_item_id(item)))
-		{
-			int const index = item - ITEM_ID_0;
-			text.push_back(shift ? shifted_digits[index] : normal_digits[index]);
-			return true;
-		}
-	}
-
-	struct key_char
-	{
-		input_item_id item;
-		char normal;
-		char shifted;
-	};
-	static constexpr key_char keys[] = {
-		{ ITEM_ID_SPACE, ' ', ' ' },
-		{ ITEM_ID_MINUS, '-', '_' },
-		{ ITEM_ID_EQUALS, '=', '+' },
-		{ ITEM_ID_OPENBRACE, '[', '{' },
-		{ ITEM_ID_CLOSEBRACE, ']', '}' },
-		{ ITEM_ID_BACKSLASH, '\\', '|' },
-		{ ITEM_ID_COLON, ';', ':' },
-		{ ITEM_ID_QUOTE, '\'', '"' },
-		{ ITEM_ID_COMMA, ',', '<' },
-		{ ITEM_ID_STOP, '.', '>' },
-		{ ITEM_ID_SLASH, '/', '?' },
-		{ ITEM_ID_TILDE, '`', '~' },
-	};
-	for (key_char const &key : keys)
-	{
-		if (key_pressed_once(machine, key.item))
-		{
-			text.push_back(shift ? key.shifted : key.normal);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 static bool mapped_raw_input_pressed(running_machine &machine, mapped_input_field const &mapped)
 {
 	return mapped.field &&
@@ -1295,8 +1227,6 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		g_kn_mame_chat_active = false;
 		g_kn_mame_chat_pending_chars.clear();
 		g_kn_mame_chat_input_overlay.clear();
-		adapter.machine.popmessage("Chat canceled");
-		g_kn_mame_status_overlay = "Chat canceled";
 		return;
 	}
 	if (key_pressed_once(adapter.machine, ITEM_ID_ENTER) ||
@@ -1311,11 +1241,6 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		if (!body.empty())
 		{
 			write_chat_outbox(adapter.chat_outbox_path, body);
-		}
-		else
-		{
-			adapter.machine.popmessage("Chat canceled");
-			g_kn_mame_status_overlay = "Chat canceled";
 		}
 		return;
 	}
@@ -1362,8 +1287,6 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 			g_kn_mame_chat_active = false;
 			g_kn_mame_chat_pending_chars.clear();
 			g_kn_mame_chat_input_overlay.clear();
-			adapter.machine.popmessage("Chat canceled");
-			g_kn_mame_status_overlay = "Chat canceled";
 			return;
 		}
 		if (event.ch == '\r' || event.ch == '\n')
@@ -1377,11 +1300,6 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 			if (!body.empty())
 			{
 				write_chat_outbox(adapter.chat_outbox_path, body);
-			}
-			else
-			{
-				adapter.machine.popmessage("Chat canceled");
-				g_kn_mame_status_overlay = "Chat canceled";
 			}
 			return;
 		}
@@ -1399,11 +1317,6 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	}
 
 	if (changed)
-	{
-		show_chat_input(adapter);
-		return;
-	}
-	if (append_raw_chat_key(adapter.machine, adapter.chat_text))
 	{
 		show_chat_input(adapter);
 		return;
