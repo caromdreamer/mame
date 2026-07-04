@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -36,6 +37,8 @@
 extern bool g_kn_mame_hide_replay_video;
 extern bool g_kn_mame_suppress_replay_audio;
 std::string g_kn_mame_status_overlay;
+std::string g_kn_mame_chat_overlay;
+std::string g_kn_mame_chat_input_overlay;
 
 namespace {
 
@@ -306,6 +309,12 @@ struct mapped_input_field
 	bool owner_only;
 };
 
+struct chat_overlay_message
+{
+	std::string text;
+	std::chrono::steady_clock::time_point expires_at;
+};
+
 } // namespace
 
 struct kaileron_adapter::impl
@@ -350,6 +359,7 @@ struct kaileron_adapter::impl
 	std::string chat_inbox_path;
 	std::string chat_outbox_path;
 	std::string chat_text;
+	std::deque<chat_overlay_message> chat_messages;
 	u64 last_chat_id = 0;
 	bool warned_missing_ports = false;
 	bool input_map_built = false;
@@ -479,6 +489,35 @@ static void write_chat_outbox(const std::string &path, const std::string &body)
 	if (!file)
 		return;
 	file << normalized_chat_line(body) << '\n';
+}
+
+static void refresh_chat_overlay(kaileron_adapter::impl &adapter)
+{
+	auto const now = std::chrono::steady_clock::now();
+	while (!adapter.chat_messages.empty() && adapter.chat_messages.front().expires_at <= now)
+		adapter.chat_messages.pop_front();
+
+	std::string overlay;
+	for (chat_overlay_message const &message : adapter.chat_messages)
+	{
+		if (!overlay.empty())
+			overlay.push_back('\n');
+		overlay += message.text;
+	}
+	g_kn_mame_chat_overlay = overlay;
+}
+
+static void append_chat_overlay(kaileron_adapter::impl &adapter, const std::string &message)
+{
+	if (message.empty())
+		return;
+
+	constexpr std::size_t max_messages = 6;
+	auto const now = std::chrono::steady_clock::now();
+	adapter.chat_messages.push_back(chat_overlay_message{message, now + std::chrono::seconds(7)});
+	while (adapter.chat_messages.size() > max_messages)
+		adapter.chat_messages.pop_front();
+	refresh_chat_overlay(adapter);
 }
 
 static bool key_pressed_once(running_machine &machine, input_item_id item)
@@ -1166,7 +1205,12 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 			event->reason == KN_LIFECYCLE_ERROR_SERVER_TIMEOUT)
 		show_kaileron_status(adapter->machine, "Kaileron: server disconnected");
 	else if (event->type == KN_LIFECYCLE_SESSION_LEFT)
+	{
 		g_kn_mame_status_overlay.clear();
+		g_kn_mame_chat_overlay.clear();
+		g_kn_mame_chat_input_overlay.clear();
+		adapter->chat_messages.clear();
+	}
 }
 
 static void poll_chat_inbox(kaileron_adapter::impl &adapter)
@@ -1203,19 +1247,13 @@ static void poll_chat_inbox(kaileron_adapter::impl &adapter)
 
 		adapter.last_chat_id = id;
 		std::string message = author + ": " + body;
-		adapter.machine.popmessage("%s", message.c_str());
-		g_kn_mame_status_overlay = message;
-		adapter.last_status_text = message;
+		append_chat_overlay(adapter, message);
 	}
 }
 
 static void show_chat_input(kaileron_adapter::impl &adapter)
 {
-	std::string message = "Chat: " + adapter.chat_text;
-	adapter.machine.popmessage("%s", message.c_str());
-	g_kn_mame_status_overlay = message;
-	adapter.last_status_text = message;
-	adapter.last_status_at = std::chrono::steady_clock::now();
+	g_kn_mame_chat_input_overlay = "Chat: " + adapter.chat_text;
 }
 
 static void process_chat_input(kaileron_adapter::impl &adapter)
@@ -1228,8 +1266,15 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	{
 		adapter.chat_active = !adapter.chat_active;
 		if (adapter.chat_active)
+		{
 			adapter.chat_text.clear();
-		show_chat_input(adapter);
+			show_chat_input(adapter);
+		}
+		else
+		{
+			adapter.chat_text.clear();
+			g_kn_mame_chat_input_overlay.clear();
+		}
 	}
 
 	if (!adapter.chat_active)
@@ -1239,6 +1284,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	{
 		adapter.chat_active = false;
 		adapter.chat_text.clear();
+		g_kn_mame_chat_input_overlay.clear();
 		adapter.machine.popmessage("Chat canceled");
 		g_kn_mame_status_overlay = "Chat canceled";
 		return;
@@ -1249,11 +1295,10 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		std::string body = normalized_chat_line(adapter.chat_text);
 		adapter.chat_active = false;
 		adapter.chat_text.clear();
+		g_kn_mame_chat_input_overlay.clear();
 		if (!body.empty())
 		{
 			write_chat_outbox(adapter.chat_outbox_path, body);
-			adapter.machine.popmessage("Chat sent: %s", body.c_str());
-			g_kn_mame_status_overlay = "Chat sent: " + body;
 		}
 		else
 		{
@@ -1285,6 +1330,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		{
 			adapter.chat_active = false;
 			adapter.chat_text.clear();
+			g_kn_mame_chat_input_overlay.clear();
 			adapter.machine.popmessage("Chat canceled");
 			g_kn_mame_status_overlay = "Chat canceled";
 			return;
@@ -1294,11 +1340,10 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 			std::string body = normalized_chat_line(adapter.chat_text);
 			adapter.chat_active = false;
 			adapter.chat_text.clear();
+			g_kn_mame_chat_input_overlay.clear();
 			if (!body.empty())
 			{
 				write_chat_outbox(adapter.chat_outbox_path, body);
-				adapter.machine.popmessage("Chat sent: %s", body.c_str());
-				g_kn_mame_status_overlay = "Chat sent: " + body;
 			}
 			else
 			{
@@ -1549,6 +1594,7 @@ bool kaileron_adapter::tick()
 		return false;
 
 	poll_chat_inbox(*m_impl);
+	refresh_chat_overlay(*m_impl);
 	process_chat_input(*m_impl);
 	m_impl->hide_replay_video = false;
 	m_impl->sdk_pace_delay_us = 0;
@@ -1584,6 +1630,8 @@ void kaileron_adapter::on_exit()
 	if (!m_impl->initialized || !m_impl->session || m_impl->reported_exit)
 		return;
 	g_kn_mame_status_overlay.clear();
+	g_kn_mame_chat_overlay.clear();
+	g_kn_mame_chat_input_overlay.clear();
 
 	KnPlaybackControl control = {};
 	control.target_speed_percent = 100;
