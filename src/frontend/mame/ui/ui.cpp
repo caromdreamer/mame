@@ -1020,13 +1020,14 @@ bool mame_ui_manager::update_and_render(render_target &target)
 		float const wrap_width = 1.0F - (x * 2.0F);
 		float const dx = 1.5F / float(std::max<u32>(1, target.width()));
 		float const dy = 1.5F / float(std::max<u32>(1, target.height()));
+		float const text_size = get_line_height(target) * 1.5F;
 		rgb_t const outline(0xdf, 0x00, 0x00, 0x00);
 		rgb_t const text_color(0xff, 0xff, 0xff, 0xff);
-		draw_text_full(target, text, x - dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent());
-		draw_text_full(target, text, x + dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent());
-		draw_text_full(target, text, x, y - dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent());
-		draw_text_full(target, text, x, y + dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent());
-		draw_text_full(target, text, x, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent());
+		draw_text_full(target, text, x - dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x + dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y - dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y + dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
 	};
 	if (!g_kn_mame_chat_overlay.empty())
 		draw_kaileron_overlay_text(g_kn_mame_chat_overlay, 0.04F, 0.12F);

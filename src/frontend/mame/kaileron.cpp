@@ -516,7 +516,7 @@ static void append_chat_overlay(kaileron_adapter::impl &adapter, const std::stri
 
 	constexpr std::size_t max_messages = 6;
 	auto const now = std::chrono::steady_clock::now();
-	adapter.chat_messages.push_back(chat_overlay_message{message, now + std::chrono::seconds(7)});
+	adapter.chat_messages.push_back(chat_overlay_message{message, now + std::chrono::seconds(12)});
 	while (adapter.chat_messages.size() > max_messages)
 		adapter.chat_messages.pop_front();
 	refresh_chat_overlay(adapter);
@@ -532,6 +532,7 @@ static bool mapped_raw_input_pressed(running_machine &machine, mapped_input_fiel
 	return mapped.field &&
 			mapped.field->enabled() &&
 			!machine.ui().is_menu_active() &&
+			!g_kn_mame_chat_active &&
 			machine.input().seq_pressed(mapped.field->seq());
 }
 
@@ -1220,61 +1221,45 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	if (!adapter.chat_active)
 		return;
 
-	if (key_pressed_once(adapter.machine, ITEM_ID_ESC))
+	auto close_chat = [&adapter] ()
 	{
 		adapter.chat_active = false;
 		adapter.chat_text.clear();
 		g_kn_mame_chat_active = false;
 		g_kn_mame_chat_pending_chars.clear();
 		g_kn_mame_chat_input_overlay.clear();
-		return;
-	}
-	if (key_pressed_once(adapter.machine, ITEM_ID_ENTER) ||
-			key_pressed_once(adapter.machine, ITEM_ID_ENTER_PAD))
+	};
+	auto send_chat = [&adapter, &close_chat] ()
 	{
 		std::string body = normalized_chat_line(adapter.chat_text);
-		adapter.chat_active = false;
-		adapter.chat_text.clear();
-		g_kn_mame_chat_active = false;
-		g_kn_mame_chat_pending_chars.clear();
-		g_kn_mame_chat_input_overlay.clear();
+		close_chat();
 		if (!body.empty())
-		{
 			write_chat_outbox(adapter.chat_outbox_path, body);
-		}
-		return;
-	}
-	if (key_pressed_once(adapter.machine, ITEM_ID_BACKSPACE))
+	};
+	auto apply_chat_char = [&adapter] (char32_t ch)
 	{
-		pop_utf8_codepoint(adapter.chat_text);
-		show_chat_input(adapter);
-		return;
-	}
+		if (ch == '\b' || ch == 0x7f)
+		{
+			pop_utf8_codepoint(adapter.chat_text);
+			return true;
+		}
+		if (ch >= 0x20 && adapter.chat_text.size() < 160)
+		{
+			append_utf8(adapter.chat_text, ch);
+			return true;
+		}
+		return false;
+	};
+
+	bool changed = false;
 	if (!g_kn_mame_chat_pending_chars.empty())
 	{
-		bool changed = false;
 		for (char32_t ch : g_kn_mame_chat_pending_chars)
-		{
-			if (ch == '\b' || ch == 0x7f)
-			{
-				pop_utf8_codepoint(adapter.chat_text);
-				changed = true;
-			}
-			else if (ch >= 0x20 && adapter.chat_text.size() < 160)
-			{
-				append_utf8(adapter.chat_text, ch);
-				changed = true;
-			}
-		}
+			changed = apply_chat_char(ch) || changed;
 		g_kn_mame_chat_pending_chars.clear();
-		if (changed)
-		{
-			show_chat_input(adapter);
-			return;
-		}
 	}
+
 	ui_event event;
-	bool changed = false;
 	while (adapter.machine.ui_input().pop_event(&event))
 	{
 		if (event.event_type != ui_event::type::IME_CHAR)
@@ -1282,40 +1267,33 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 
 		if (event.ch == 0x1b)
 		{
-			adapter.chat_active = false;
-			adapter.chat_text.clear();
-			g_kn_mame_chat_active = false;
-			g_kn_mame_chat_pending_chars.clear();
-			g_kn_mame_chat_input_overlay.clear();
+			close_chat();
 			return;
 		}
 		if (event.ch == '\r' || event.ch == '\n')
 		{
-			std::string body = normalized_chat_line(adapter.chat_text);
-			adapter.chat_active = false;
-			adapter.chat_text.clear();
-			g_kn_mame_chat_active = false;
-			g_kn_mame_chat_pending_chars.clear();
-			g_kn_mame_chat_input_overlay.clear();
-			if (!body.empty())
-			{
-				write_chat_outbox(adapter.chat_outbox_path, body);
-			}
+			send_chat();
 			return;
 		}
-		if (event.ch == '\b' || event.ch == 0x7f)
-		{
-			pop_utf8_codepoint(adapter.chat_text);
-			changed = true;
-			continue;
-		}
-		if (event.ch >= 0x20 && adapter.chat_text.size() < 160)
-		{
-			append_utf8(adapter.chat_text, event.ch);
-			changed = true;
-		}
+		changed = apply_chat_char(event.ch) || changed;
 	}
 
+	if (key_pressed_once(adapter.machine, ITEM_ID_ESC))
+	{
+		close_chat();
+		return;
+	}
+	if (key_pressed_once(adapter.machine, ITEM_ID_ENTER) ||
+			key_pressed_once(adapter.machine, ITEM_ID_ENTER_PAD))
+	{
+		send_chat();
+		return;
+	}
+	if (key_pressed_once(adapter.machine, ITEM_ID_BACKSPACE))
+	{
+		pop_utf8_codepoint(adapter.chat_text);
+		changed = true;
+	}
 	if (changed)
 	{
 		show_chat_input(adapter);
