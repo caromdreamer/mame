@@ -419,7 +419,7 @@ void sdl_osd_interface::customize_input_type_list(std::vector<input_type_entry> 
 
 		case IPT_OSD_9:
 			entry.configure_osd("KAILERON_CHAT", N_p("input-name", "Kaileron Chat"));
-			entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F8);
+			entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_ENTER);
 			break;
 
 		// disable the config menu if the ALT key is down

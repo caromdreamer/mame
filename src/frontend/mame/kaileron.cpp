@@ -1198,23 +1198,14 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	if (adapter.chat_outbox_path.empty())
 		return;
 
-	if (adapter.machine.ui_input().pressed(IPT_OSD_9))
+	if (!adapter.chat_active && adapter.machine.ui_input().pressed(IPT_OSD_9))
 	{
-		adapter.chat_active = !adapter.chat_active;
-		if (adapter.chat_active)
-		{
-			adapter.chat_text.clear();
-			g_kn_mame_chat_pending_chars.clear();
-			g_kn_mame_chat_active = true;
-			show_chat_input(adapter);
-		}
-		else
-		{
-			adapter.chat_text.clear();
-			g_kn_mame_chat_active = false;
-			g_kn_mame_chat_pending_chars.clear();
-			g_kn_mame_chat_input_overlay.clear();
-		}
+		adapter.chat_active = true;
+		adapter.chat_text.clear();
+		g_kn_mame_chat_pending_chars.clear();
+		g_kn_mame_chat_active = true;
+		show_chat_input(adapter);
+		return;
 	}
 
 	if (!adapter.chat_active)
