@@ -51,7 +51,11 @@
 #include "../osd/modules/lib/osdobj_common.h"
 
 #include <functional>
+#include <string>
 #include <type_traits>
+
+extern bool g_kn_mame_chat_active;
+extern std::u32string g_kn_mame_chat_pending_chars;
 
 
 /***************************************************************************
@@ -753,7 +757,11 @@ void mame_ui_manager::display_startup_screens(bool first_time)
 
 					case ui_event::type::POINTER_LEAVE:
 					case ui_event::type::POINTER_ABORT:
+						break;
+
 					case ui_event::type::IME_CHAR:
+						if (g_kn_mame_chat_active)
+							g_kn_mame_chat_pending_chars.push_back(event.ch);
 						break;
 					}
 				}
