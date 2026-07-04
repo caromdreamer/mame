@@ -138,11 +138,6 @@ void windows_osd_interface::customize_input_type_list(std::vector<input_type_ent
 				entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F10, KEYCODE_LALT);
 				break;
 
-			case IPT_OSD_9:
-				entry.configure_osd("KAILERON_CHAT", N_p("input-name", "Kaileron Chat"));
-				entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_ENTER);
-				break;
-
 			// add a Not LALT condition to the throttle key
 			case IPT_UI_THROTTLE:
 				entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F10, input_seq::not_code, KEYCODE_LALT);

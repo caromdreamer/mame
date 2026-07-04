@@ -417,11 +417,6 @@ void sdl_osd_interface::customize_input_type_list(std::vector<input_type_entry> 
 			entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F12, KEYCODE_LSHIFT, KEYCODE_LALT);
 			break;
 
-		case IPT_OSD_9:
-			entry.configure_osd("KAILERON_CHAT", N_p("input-name", "Kaileron Chat"));
-			entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_ENTER);
-			break;
-
 		// disable the config menu if the ALT key is down
 		// (allows ALT-TAB to switch between apps)
 		case IPT_UI_MENU:

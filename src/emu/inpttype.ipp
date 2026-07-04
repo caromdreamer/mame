@@ -628,6 +628,7 @@ namespace {
 		INPUT_PORT_DIGITAL_TYPE(  0, OTHER,    MEMORY_RESET,        N_p("input-name", "Memory Reset"),           input_seq(KEYCODE_F1) ) \
 		INPUT_PORT_DIGITAL_TYPE(  0, OTHER,    VOLUME_DOWN,         N_p("input-name", "Volume Down"),            input_seq(KEYCODE_MINUS) ) \
 		INPUT_PORT_DIGITAL_TYPE(  0, OTHER,    VOLUME_UP,           N_p("input-name", "Volume Up"),              input_seq(KEYCODE_EQUALS) ) \
+		INPUT_PORT_DIGITAL_TYPE(  0, OTHER,    KAILERON_CHAT,       N_p("input-name", "Kaileron Chat"),          input_seq(KEYCODE_ENTER) ) \
 		CORE_INPUT_TYPES_END()
 
 #define CORE_INPUT_TYPES_PEDAL \

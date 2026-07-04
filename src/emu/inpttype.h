@@ -70,6 +70,7 @@ enum ioport_type : osd::u32
 	IPT_MEMORY_RESET,
 	IPT_VOLUME_UP,
 	IPT_VOLUME_DOWN,
+	IPT_KAILERON_CHAT,
 	IPT_START, // use the numbered start button(s) for coin-ops
 	IPT_SELECT,
 	IPT_KEYPAD,

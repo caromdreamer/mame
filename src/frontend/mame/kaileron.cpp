@@ -1198,7 +1198,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	if (adapter.chat_outbox_path.empty())
 		return;
 
-	if (!adapter.chat_active && adapter.machine.ui_input().pressed(IPT_OSD_9))
+	if (!adapter.chat_active && adapter.machine.ui_input().pressed(IPT_KAILERON_CHAT))
 	{
 		adapter.chat_active = true;
 		adapter.chat_text.clear();
