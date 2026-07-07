@@ -1137,7 +1137,7 @@ static void poll_chat_inbox(kaileron_adapter::impl &adapter)
 			continue;
 
 		adapter.last_chat_id = id;
-		std::string message = author + ": " + body;
+		std::string message = "<" + author + "> " + body;
 		append_chat_overlay(adapter, message);
 	}
 }
