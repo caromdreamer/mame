@@ -1195,13 +1195,17 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		if (!body.empty())
 			write_chat_outbox(adapter.chat_outbox_path, body);
 	};
-	auto apply_chat_char = [&adapter] (char32_t ch)
+	auto apply_chat_backspace = [&adapter] ()
+	{
+		if (adapter.chat_text.empty())
+			return false;
+		pop_utf8_codepoint(adapter.chat_text);
+		return true;
+	};
+	auto apply_chat_char = [&adapter, &apply_chat_backspace] (char32_t ch)
 	{
 		if (ch == '\b' || ch == 0x7f)
-		{
-			pop_utf8_codepoint(adapter.chat_text);
-			return true;
-		}
+			return apply_chat_backspace();
 		if (ch >= 0x20 && adapter.chat_text.size() < 160)
 		{
 			append_utf8(adapter.chat_text, ch);
@@ -1211,10 +1215,14 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	};
 
 	bool changed = false;
+	bool saw_ime_chat_input = false;
 	if (!g_kn_mame_chat_pending_chars.empty())
 	{
 		for (char32_t ch : g_kn_mame_chat_pending_chars)
+		{
+			saw_ime_chat_input = true;
 			changed = apply_chat_char(ch) || changed;
+		}
 		g_kn_mame_chat_pending_chars.clear();
 	}
 
@@ -1236,6 +1244,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 			send_chat();
 			return;
 		}
+		saw_ime_chat_input = true;
 		changed = apply_chat_char(event.ch) || changed;
 	}
 
@@ -1246,11 +1255,8 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		send_chat();
 		return;
 	}
-	if (key_pressed_once(adapter.machine, ITEM_ID_BACKSPACE))
-	{
-		pop_utf8_codepoint(adapter.chat_text);
-		changed = true;
-	}
+	if (!saw_ime_chat_input && key_pressed_once(adapter.machine, ITEM_ID_BACKSPACE))
+		changed = apply_chat_backspace() || changed;
 	if (changed)
 	{
 		show_chat_input(adapter);
