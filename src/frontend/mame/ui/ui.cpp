@@ -1796,6 +1796,8 @@ uint32_t mame_ui_manager::handler_ingame()
 	// turn on menus if requested
 	if (machine().ui_input().pressed(IPT_UI_MENU))
 	{
+		if (g_kn_mame_chat_active)
+			return 0;
 		m_ui_target = &current_ui_target();
 		if (!netplay_ui_locked && !machine().paused() && options().menu_pause())
 		{

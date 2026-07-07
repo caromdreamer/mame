@@ -369,6 +369,7 @@ struct kaileron_adapter::impl
 	bool initialized = false;
 	bool chat_active = false;
 	bool chat_hotkey_down = false;
+	bool chat_enter_ready = false;
 	bool reported_exit = false;
 	bool in_advance = false;
 	bool in_runahead = false;
@@ -1203,10 +1204,14 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 	bool const chat_hotkey_pressed = chat_hotkey_down && !adapter.chat_hotkey_down;
 	adapter.chat_hotkey_down = chat_hotkey_down;
 
+	if (!adapter.chat_active && adapter.machine.ui().is_menu_active())
+		return;
+
 	if (!adapter.chat_active && chat_hotkey_pressed)
 	{
 		adapter.chat_active = true;
 		adapter.chat_text.clear();
+		adapter.chat_enter_ready = false;
 		g_kn_mame_chat_pending_chars.clear();
 		g_kn_mame_chat_active = true;
 		ui_event event;
@@ -1219,6 +1224,9 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 
 	if (!adapter.chat_active)
 		return;
+
+	if (!chat_hotkey_down)
+		adapter.chat_enter_ready = true;
 
 	auto close_chat = [&adapter] ()
 	{
@@ -1271,7 +1279,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		}
 		if (event.ch == '\r' || event.ch == '\n')
 		{
-			if (chat_hotkey_down)
+			if (!adapter.chat_enter_ready)
 				continue;
 			send_chat();
 			return;
@@ -1279,12 +1287,7 @@ static void process_chat_input(kaileron_adapter::impl &adapter)
 		changed = apply_chat_char(event.ch) || changed;
 	}
 
-	if (key_pressed_once(adapter.machine, ITEM_ID_ESC))
-	{
-		close_chat();
-		return;
-	}
-	if (!chat_hotkey_down &&
+	if (adapter.chat_enter_ready &&
 			(key_pressed_once(adapter.machine, ITEM_ID_ENTER) ||
 			key_pressed_once(adapter.machine, ITEM_ID_ENTER_PAD)))
 	{
