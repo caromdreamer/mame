@@ -35,7 +35,6 @@
 #include <vector>
 
 extern bool g_kn_mame_hide_replay_video;
-extern bool g_kn_mame_suppress_replay_audio;
 std::string g_kn_mame_status_overlay;
 std::string g_kn_mame_chat_overlay;
 std::string g_kn_mame_chat_input_overlay;
@@ -346,8 +345,6 @@ struct kaileron_adapter::impl
 	u32 save_count = 0;
 	u32 load_count = 0;
 	u32 advance_count = 0;
-	u32 runahead_frames = 0;
-	u32 runahead_count = 0;
 	u32 injected_frame_count = 0;
 	u32 nonneutral_input_count = 0;
 	u32 last_snapshot_size = 0;
@@ -372,7 +369,6 @@ struct kaileron_adapter::impl
 	bool chat_enter_ready = false;
 	bool reported_exit = false;
 	bool in_advance = false;
-	bool in_runahead = false;
 	bool networked = false;
 	bool spectator = false;
 	bool original_throttled = true;
@@ -802,7 +798,7 @@ static std::vector<KnInput> cleaned_player_inputs(kaileron_adapter::impl &adapte
 	return cleaned;
 }
 
-static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count, bool count_stats)
+static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count)
 {
 	bool apply_to_mame = env_enabled("KN_MAME_APPLY_INPUT");
 	build_input_map(adapter);
@@ -825,9 +821,9 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 		u8 input = 0;
 		if (canonical_players && canonical_players[player].bytes && canonical_players[player].len > 0)
 			input = canonical_players[player].bytes[0];
-		if (count_stats && input)
+		if (input)
 			adapter.nonneutral_input_count++;
-		if (count_stats && adapter.trace && player < 2 && input != adapter.last_applied_input[player])
+		if (adapter.trace && player < 2 && input != adapter.last_applied_input[player])
 		{
 			osd_printf_info("Kaileron trace: apply_input frame=%u player=%u input=%02x machine=%s\n",
 					adapter.frame_count, player, input, adapter.machine.system().name);
@@ -843,8 +839,7 @@ static void apply_mapped_inputs(kaileron_adapter::impl &adapter, const KnInput *
 			set_live_field(mapped.field, pressed);
 		}
 	}
-	if (count_stats)
-		adapter.injected_frame_count++;
+	adapter.injected_frame_count++;
 }
 
 static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, KnMutableInput *out_input)
@@ -891,14 +886,11 @@ static bool load_machine_state_from_buffer(kaileron_adapter::impl &adapter, cons
 	return adapter.machine.save().read_buffer(bytes.data(), bytes.size()) == STATERR_NONE;
 }
 
-static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, bool hide_video, bool mute_audio)
+static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, bool hide_video)
 {
 	bool const previous_hide_replay_video = g_kn_mame_hide_replay_video;
-	bool const previous_suppress_replay_audio = g_kn_mame_suppress_replay_audio;
 	if (hide_video)
 		g_kn_mame_hide_replay_video = true;
-	if (mute_audio)
-		g_kn_mame_suppress_replay_audio = true;
 
 	u32 target_frame = adapter.frame_count + 1;
 	u32 guard = 0;
@@ -912,13 +904,11 @@ static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, b
 				osd_printf_info("Kaileron trace: advance_frame guard exhausted frame=%u current_mame_frames=%u target_mame_frames=%u guard=%u\n",
 						frame, adapter.frame_count, target_frame, guard);
 			g_kn_mame_hide_replay_video = previous_hide_replay_video;
-			g_kn_mame_suppress_replay_audio = previous_suppress_replay_audio;
 			return KN_ERR_CALLBACK;
 		}
 	}
 
 	g_kn_mame_hide_replay_video = previous_hide_replay_video;
-	g_kn_mame_suppress_replay_audio = previous_suppress_replay_audio;
 	return KN_OK;
 }
 
@@ -1000,12 +990,11 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 			adapter->sdk_render_interval > 1 &&
 			(frame % adapter->sdk_render_interval) != 0;
 	bool const hide_video = adapter->hide_replay_video || skip_catchup_video;
-	bool const runahead_enabled = adapter->runahead_frames > 0 && !hide_video && !adapter->spectator;
 
-	apply_mapped_inputs(*adapter, players, player_count, true);
+	apply_mapped_inputs(*adapter, players, player_count);
 
 	adapter->in_advance = true;
-	KnResult result = advance_mame_frame(*adapter, frame, hide_video || runahead_enabled, hide_video);
+	KnResult result = advance_mame_frame(*adapter, frame, hide_video);
 	if (result != KN_OK)
 	{
 		adapter->in_advance = false;
@@ -1013,43 +1002,6 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	}
 	adapter->advance_count++;
 
-	if (runahead_enabled)
-	{
-		if (adapter->machine.scheduled_event_pending())
-		{
-			adapter->in_advance = false;
-			return KN_OK;
-		}
-
-		std::vector<u8> runahead_snapshot;
-		if (!save_machine_state_to_buffer(*adapter, runahead_snapshot))
-		{
-			adapter->in_advance = false;
-			return KN_ERR_CALLBACK;
-		}
-
-		adapter->in_runahead = true;
-		for (u32 lookahead = 0; lookahead < adapter->runahead_frames; lookahead++)
-		{
-			bool const final_lookahead_frame = lookahead + 1 == adapter->runahead_frames;
-			apply_mapped_inputs(*adapter, players, player_count, false);
-			result = advance_mame_frame(*adapter, frame, !final_lookahead_frame, true);
-			if (result != KN_OK)
-			{
-				adapter->in_runahead = false;
-				adapter->in_advance = false;
-				return result;
-			}
-		}
-		adapter->in_runahead = false;
-
-		if (!load_machine_state_from_buffer(*adapter, runahead_snapshot))
-		{
-			adapter->in_advance = false;
-			return KN_ERR_CALLBACK;
-		}
-		adapter->runahead_count++;
-	}
 	adapter->in_advance = false;
 	if (adapter->trace && adapter->load_count > 0)
 		osd_printf_info("Kaileron trace: advance_frame done frame=%u after mame_frames=%u advances=%u\n", frame, adapter->frame_count, adapter->advance_count);
@@ -1446,13 +1398,9 @@ bool kaileron_adapter::initialize()
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
 	m_impl->chat_inbox_path = env_value("KN_CHAT_INBOX", "");
 	m_impl->chat_outbox_path = env_value("KN_CHAT_OUTBOX", "");
-	m_impl->runahead_frames = m_impl->spectator ? 0 : std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 2);
 	m_impl->local_socd_mode = parse_socd_mode(env_value("KN_SOCD_MODE", "up_priority"));
 	if (m_impl->trace)
-	{
 		osd_printf_info("Kaileron trace: SOCD mode=%s\n", socd_mode_name(m_impl->local_socd_mode));
-		osd_printf_info("Kaileron trace: runahead_frames=%u\n", m_impl->runahead_frames);
-	}
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
@@ -1511,13 +1459,12 @@ bool kaileron_adapter::initialize()
 
 	m_impl->initialized = true;
 	osd_printf_info(
-			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u runahead=%u sdk=%s\n",
+			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u sdk=%s\n",
 			server[0] ? server : "(local)",
 			session,
 			config.player_id,
 			config.player_count,
 			input_size,
-			m_impl->runahead_frames,
 			library_path);
 	update_playback_status_overlay(*m_impl);
 	return true;
@@ -1582,7 +1529,7 @@ void kaileron_adapter::on_exit()
 	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
-				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u runahead=%u runahead_frames=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
+				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
 				metrics.current_frame,
 				m_impl->frame_count,
 				metrics.confirmed_frame_count,
@@ -1591,8 +1538,6 @@ void kaileron_adapter::on_exit()
 				m_impl->save_count,
 				m_impl->load_count,
 				m_impl->advance_count,
-				m_impl->runahead_count,
-				m_impl->runahead_frames,
 				m_impl->injected_frame_count,
 				m_impl->nonneutral_input_count,
 				m_impl->last_local_input,

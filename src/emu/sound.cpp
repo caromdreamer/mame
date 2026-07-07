@@ -45,7 +45,6 @@
 
 
 const attotime sound_manager::STREAMS_UPDATE_ATTOTIME = attotime::from_hz(STREAMS_UPDATE_FREQUENCY);
-bool g_kn_mame_suppress_replay_audio = false;
 
 
 //**// Output buffer management
@@ -998,12 +997,6 @@ void sound_manager::input_get(int id, sound_stream &stream)
 
 void sound_manager::output_push(int id, sound_stream &stream)
 {
-	if (g_kn_mame_suppress_replay_audio)
-	{
-		m_record_samples = 0;
-		return;
-	}
-
 	auto &spk = m_speakers[id];
 	auto &out = spk.m_buffer;
 	auto &inp = stream.m_input_buffer;
