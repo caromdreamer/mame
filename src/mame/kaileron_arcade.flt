@@ -65,6 +65,7 @@
 "gottlieb/gottlieb.cpp"
 "handheld/hh_sm510.cpp"
 "ice/skimaxx.cpp"
+"igs/goldstar.cpp"
 "igs/igs011.cpp"
 "igs/lordgun.cpp"
 "igs/pgm.cpp"
