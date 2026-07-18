@@ -28,10 +28,10 @@
 #include <cstring>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <thread>
-#include <unordered_map>
 #include <vector>
 
 extern bool g_kn_mame_hide_replay_video;
@@ -126,6 +126,12 @@ bool parse_u32(const char *value, u32 &out)
 
 	out = u32(parsed);
 	return true;
+}
+
+u64 elapsed_us(std::chrono::steady_clock::time_point start)
+{
+	auto elapsed = std::chrono::steady_clock::now() - start;
+	return u64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count());
 }
 
 bool env_enabled(const char *name)
@@ -316,6 +322,13 @@ struct chat_overlay_message
 	std::chrono::steady_clock::time_point expires_at;
 };
 
+struct snapshot_slot
+{
+	u32 frame = 0;
+	bool valid = false;
+	std::vector<u8> bytes;
+};
+
 } // namespace
 
 struct kaileron_adapter::impl
@@ -337,7 +350,7 @@ struct kaileron_adapter::impl
 	kn_host_session_get_metrics_fn kn_host_session_get_metrics = nullptr;
 	kn_host_session_get_playback_status_fn kn_host_session_get_playback_status = nullptr;
 	kn_host_session_leave_fn kn_host_session_leave = nullptr;
-	std::unordered_map<u32, std::vector<u8>> snapshots;
+	std::vector<snapshot_slot> snapshots;
 	u32 player_id = 0;
 	u32 player_count = 1;
 	u32 input_size = 1;
@@ -345,10 +358,18 @@ struct kaileron_adapter::impl
 	u32 save_count = 0;
 	u32 load_count = 0;
 	u32 advance_count = 0;
+	u32 discard_count = 0;
 	u32 injected_frame_count = 0;
 	u32 nonneutral_input_count = 0;
 	u32 last_snapshot_size = 0;
+	u32 snapshot_capacity = 0;
+	u32 snapshot_signature = 0;
 	u32 frame_duration_us = 0;
+	size_t snapshot_size = 0;
+	u64 save_time_us = 0;
+	u64 load_time_us = 0;
+	u64 advance_time_us = 0;
+	u64 discard_time_us = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point last_status_at = {};
@@ -865,17 +886,49 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	return KN_OK;
 }
 
-static bool save_machine_state_to_buffer(kaileron_adapter::impl &adapter, std::vector<u8> &bytes)
+static bool ensure_snapshot_size(kaileron_adapter::impl &adapter)
 {
 	if (adapter.machine.scheduled_event_pending())
 		return false;
 
-	int size = ram_state::get_size(adapter.machine.save());
-	if (size <= 0)
+	if (adapter.snapshot_size != 0)
+		return true;
+
+	size_t const size = ram_state::get_size(adapter.machine.save());
+	if (size == 0 || size > std::numeric_limits<u32>::max())
 		return false;
 
-	bytes.resize(size);
-	return adapter.machine.save().write_buffer(bytes.data(), bytes.size()) == STATERR_NONE;
+	adapter.snapshot_size = size;
+	adapter.snapshot_signature = adapter.machine.save().state_signature();
+	adapter.last_snapshot_size = u32(size);
+	return true;
+}
+
+static u32 default_snapshot_capacity(kaileron_adapter::impl const &adapter)
+{
+	if (adapter.snapshot_capacity > 0)
+		return adapter.snapshot_capacity;
+
+	return 121;
+}
+
+static void ensure_snapshot_ring(kaileron_adapter::impl &adapter)
+{
+	if (!adapter.snapshots.empty())
+		return;
+
+	u32 const capacity = env_u32("KN_MAME_SNAPSHOT_SLOTS", default_snapshot_capacity(adapter));
+	adapter.snapshot_capacity = std::max<u32>(capacity, 1);
+	adapter.snapshots.resize(adapter.snapshot_capacity);
+}
+
+static bool save_machine_state_to_buffer(kaileron_adapter::impl &adapter, std::vector<u8> &bytes)
+{
+	if (!ensure_snapshot_size(adapter))
+		return false;
+
+	bytes.resize(adapter.snapshot_size);
+	return adapter.machine.save().write_buffer_with_signature(bytes.data(), bytes.size(), adapter.snapshot_signature) == STATERR_NONE;
 }
 
 static bool load_machine_state_from_buffer(kaileron_adapter::impl &adapter, const std::vector<u8> &bytes)
@@ -883,7 +936,35 @@ static bool load_machine_state_from_buffer(kaileron_adapter::impl &adapter, cons
 	if (bytes.empty())
 		return false;
 
-	return adapter.machine.save().read_buffer(bytes.data(), bytes.size()) == STATERR_NONE;
+	if (!ensure_snapshot_size(adapter))
+		return false;
+
+	return adapter.machine.save().read_buffer_with_signature(bytes.data(), bytes.size(), adapter.snapshot_signature) == STATERR_NONE;
+}
+
+static snapshot_slot *find_snapshot_slot(kaileron_adapter::impl &adapter, u32 frame)
+{
+	if (adapter.snapshots.empty())
+		return nullptr;
+
+	snapshot_slot &slot = adapter.snapshots[frame % adapter.snapshot_capacity];
+	if (!slot.valid || slot.frame != frame)
+		return nullptr;
+	return &slot;
+}
+
+static u32 valid_snapshot_slot_count(kaileron_adapter::impl const &adapter)
+{
+	u32 count = 0;
+	for (snapshot_slot const &slot : adapter.snapshots)
+		if (slot.valid)
+			count++;
+	return count;
+}
+
+static u64 average_us(u64 total, u32 count)
+{
+	return count > 0 ? total / count : 0;
 }
 
 static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, bool hide_video)
@@ -923,13 +1004,17 @@ static KnResult KN_CALL kn_mame_save_state(void *user, u32 frame)
 	if (adapter->trace && adapter->save_count < 5)
 		osd_printf_info("Kaileron trace: save_state frame=%u\n", frame);
 
-	std::vector<u8> bytes;
-	if (!save_machine_state_to_buffer(*adapter, bytes))
+	auto const start = std::chrono::steady_clock::now();
+	ensure_snapshot_ring(*adapter);
+	snapshot_slot &slot = adapter->snapshots[frame % adapter->snapshot_capacity];
+	if (!save_machine_state_to_buffer(*adapter, slot.bytes))
 		return KN_ERR_CALLBACK;
 
-	adapter->last_snapshot_size = u32(bytes.size());
-	adapter->snapshots[frame] = std::move(bytes);
+	slot.frame = frame;
+	slot.valid = true;
+	adapter->last_snapshot_size = u32(slot.bytes.size());
 	adapter->save_count++;
+	adapter->save_time_us += elapsed_us(start);
 	if (adapter->trace && adapter->save_count < 6)
 		osd_printf_info("Kaileron trace: save_state done frame=%u size=%u\n", frame, adapter->last_snapshot_size);
 	return KN_OK;
@@ -943,17 +1028,19 @@ static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 	if (adapter->machine.scheduled_event_pending())
 		return KN_OK;
 
-	auto found = adapter->snapshots.find(frame);
-	if (found == adapter->snapshots.end())
+	snapshot_slot *slot = find_snapshot_slot(*adapter, frame);
+	if (!slot)
 		return KN_ERR_CALLBACK;
 
 	if (adapter->trace)
-		osd_printf_info("Kaileron trace: load_state frame=%u size=%u load_count=%u current_mame_frames=%u\n", frame, u32(found->second.size()), adapter->load_count, adapter->frame_count);
+		osd_printf_info("Kaileron trace: load_state frame=%u size=%u load_count=%u current_mame_frames=%u\n", frame, u32(slot->bytes.size()), adapter->load_count, adapter->frame_count);
 
-	if (!load_machine_state_from_buffer(*adapter, found->second))
+	auto const start = std::chrono::steady_clock::now();
+	if (!load_machine_state_from_buffer(*adapter, slot->bytes))
 		return KN_ERR_CALLBACK;
 
 	adapter->load_count++;
+	adapter->load_time_us += elapsed_us(start);
 	adapter->hide_replay_video = true;
 	if (adapter->trace)
 		osd_printf_info("Kaileron trace: load_state done frame=%u load_count=%u\n", frame, adapter->load_count);
@@ -966,13 +1053,19 @@ static void KN_CALL kn_mame_discard_states_before(void *user, u32 frame)
 	if (!adapter)
 		return;
 
-	for (auto it = adapter->snapshots.begin(); it != adapter->snapshots.end(); )
+	auto const start = std::chrono::steady_clock::now();
+	u32 discarded = 0;
+	for (snapshot_slot &slot : adapter->snapshots)
 	{
-		if (it->first < frame)
-			it = adapter->snapshots.erase(it);
-		else
-			++it;
+		if (slot.valid && slot.frame < frame)
+		{
+			slot.valid = false;
+			discarded++;
+		}
 	}
+	if (discarded > 0)
+		adapter->discard_count += discarded;
+	adapter->discard_time_us += elapsed_us(start);
 }
 
 static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInput *players, u32 player_count)
@@ -994,6 +1087,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	apply_mapped_inputs(*adapter, players, player_count);
 
 	adapter->in_advance = true;
+	auto const start = std::chrono::steady_clock::now();
 	KnResult result = advance_mame_frame(*adapter, frame, hide_video);
 	if (result != KN_OK)
 	{
@@ -1001,6 +1095,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 		return result;
 	}
 	adapter->advance_count++;
+	adapter->advance_time_us += elapsed_us(start);
 
 	adapter->in_advance = false;
 	if (adapter->trace && adapter->load_count > 0)
@@ -1016,12 +1111,11 @@ static u64 KN_CALL kn_mame_state_hash(void *user)
 	if (!adapter)
 		return 0;
 
-	int size = ram_state::get_size(adapter->machine.save());
-	if (size <= 0)
+	if (!ensure_snapshot_size(*adapter))
 		return 0;
 
-	std::vector<u8> bytes(size);
-	if (adapter->machine.save().write_buffer(bytes.data(), bytes.size()) != STATERR_NONE)
+	std::vector<u8> bytes(adapter->snapshot_size);
+	if (adapter->machine.save().write_buffer_with_signature(bytes.data(), bytes.size(), adapter->snapshot_signature) != STATERR_NONE)
 		return 0;
 
 	return fnv1a64(bytes.data(), bytes.size());
@@ -1453,6 +1547,9 @@ bool kaileron_adapter::initialize()
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);
+	m_impl->snapshot_capacity = env_u32(
+			"KN_MAME_SNAPSHOT_SLOTS",
+			config.max_rollback_frames > 0 ? config.max_rollback_frames + 1 : 121);
 
 	show_kaileron_status(m_impl->machine, std::string("Kaileron: creating session ") + session);
 	KnResult result = m_impl->kn_host_session_create(&config, &callbacks, &m_impl->session);
@@ -1535,7 +1632,7 @@ void kaileron_adapter::on_exit()
 	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
-				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
+				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
 				metrics.current_frame,
 				m_impl->frame_count,
 				metrics.confirmed_frame_count,
@@ -1548,6 +1645,13 @@ void kaileron_adapter::on_exit()
 				m_impl->nonneutral_input_count,
 				m_impl->last_local_input,
 				m_impl->last_snapshot_size,
+				valid_snapshot_slot_count(*m_impl),
+				u32(m_impl->snapshots.size()),
+				(unsigned long long)average_us(m_impl->save_time_us, m_impl->save_count),
+				(unsigned long long)average_us(m_impl->load_time_us, m_impl->load_count),
+				(unsigned long long)average_us(m_impl->advance_time_us, m_impl->advance_count),
+				(unsigned long long)m_impl->discard_time_us,
+				m_impl->discard_count,
 				(unsigned long long)metrics.confirmed_input_hash,
 				(unsigned long long)metrics.current_state_hash,
 				metrics.confirmed_missing_frames,

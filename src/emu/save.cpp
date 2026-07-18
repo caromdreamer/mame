@@ -404,6 +404,54 @@ save_error save_manager::read_buffer(const void *buf, size_t size)
 
 
 //-------------------------------------------------
+//  write_buffer_with_signature - write using a
+//  known buffer size and state signature
+//-------------------------------------------------
+
+save_error save_manager::write_buffer_with_signature(void *buf, size_t size, u32 signature)
+{
+	return do_write_known(
+			size,
+			signature,
+			[size] (size_t total_size) { return size == total_size; },
+			[ptr = reinterpret_cast<u8 *>(buf)] (const void *data, size_t size) mutable
+			{
+				memcpy(ptr, data, size);
+				ptr += size;
+				return true;
+			},
+			[] () { return true; },
+			[] () { return true; });
+}
+
+
+//-------------------------------------------------
+//  read_buffer_with_signature - restore using a
+//  known buffer size and state signature
+//-------------------------------------------------
+
+save_error save_manager::read_buffer_with_signature(const void *buf, size_t size, u32 signature)
+{
+	const u8 *ptr = reinterpret_cast<const u8 *>(buf);
+	const u8 *const end = ptr + size;
+	return do_read_known(
+			size,
+			signature,
+			[size] (size_t total_size) { return size == total_size; },
+			[&ptr, &end] (void *data, size_t size) -> bool
+			{
+				if ((ptr + size) > end)
+					return false;
+				memcpy(data, ptr, size);
+				ptr += size;
+				return true;
+			},
+			[] () { return true; },
+			[] () { return true; });
+}
+
+
+//-------------------------------------------------
 //  do_write - serialisation logic
 //-------------------------------------------------
 
@@ -434,6 +482,41 @@ inline save_error save_manager::do_write(T check_space, U write_block, V start_h
 	dispatch_presave();
 
 	// then write all the data
+	for (auto &entry : m_entry_list)
+	{
+		const u32 blocksize = entry->m_typesize * entry->m_typecount;
+		const u8 *data = reinterpret_cast<const u8 *>(entry->m_data);
+		for (u32 b = 0; entry->m_blockcount > b; ++b, data += entry->m_stride)
+			if (!write_block(data, blocksize))
+				return STATERR_WRITE_ERROR;
+	}
+	return STATERR_NONE;
+}
+
+
+//-------------------------------------------------
+//  do_write_known - serialisation logic using
+//  caller-provided layout metadata
+//-------------------------------------------------
+
+template <typename T, typename U, typename V, typename W>
+inline save_error save_manager::do_write_known(size_t total_size, u32 signature, T check_space, U write_block, V start_header, W start_data)
+{
+	if (!check_space(total_size))
+		return STATERR_WRITE_ERROR;
+
+	u8 header[HEADER_SIZE];
+	memcpy(&header[0], STATE_MAGIC_NUM, 8);
+	header[8] = SAVE_VERSION;
+	header[9] = NATIVE_ENDIAN_VALUE_LE_BE(0, SS_MSB_FIRST);
+	strncpy((char *)&header[0x0a], machine().system().name, 0x1c - 0x0a);
+	put_u32le(&header[0x1c], signature);
+
+	if (!start_header() || !write_block(header, sizeof(header)) || !start_data())
+		return STATERR_WRITE_ERROR;
+
+	dispatch_presave();
+
 	for (auto &entry : m_entry_list)
 	{
 		const u32 blocksize = entry->m_typesize * entry->m_typecount;
@@ -488,6 +571,44 @@ inline save_error save_manager::do_read(T check_length, U read_block, V start_he
 	}
 
 	// call the post-load functions
+	dispatch_postload();
+
+	return STATERR_NONE;
+}
+
+
+//-------------------------------------------------
+//  do_read_known - deserialisation logic using
+//  caller-provided layout metadata
+//-------------------------------------------------
+
+template <typename T, typename U, typename V, typename W>
+inline save_error save_manager::do_read_known(size_t total_size, u32 signature, T check_length, U read_block, V start_header, W start_data)
+{
+	if (!check_length(total_size))
+		return STATERR_READ_ERROR;
+
+	u8 header[HEADER_SIZE];
+	if (!start_header() || !read_block(header, sizeof(header)) || !start_data())
+		return STATERR_READ_ERROR;
+
+	if (validate_header(header, machine().system().name, signature).first != STATERR_NONE)
+		return STATERR_INVALID_HEADER;
+
+	const bool flip = NATIVE_ENDIAN_VALUE_LE_BE((header[9] & SS_MSB_FIRST) != 0, (header[9] & SS_MSB_FIRST) == 0);
+
+	for (auto &entry : m_entry_list)
+	{
+		const u32 blocksize = entry->m_typesize * entry->m_typecount;
+		u8 *data = reinterpret_cast<u8 *>(entry->m_data);
+		for (u32 b = 0; entry->m_blockcount > b; ++b, data += entry->m_stride)
+			if (!read_block(data, blocksize))
+				return STATERR_READ_ERROR;
+
+		if (flip)
+			entry->flip_data();
+	}
+
 	dispatch_postload();
 
 	return STATERR_NONE;

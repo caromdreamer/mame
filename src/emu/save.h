@@ -310,6 +310,9 @@ public:
 
 	save_error write_buffer(void *buf, size_t size);
 	save_error read_buffer(const void *buf, size_t size);
+	u32 state_signature() const { return signature(); }
+	save_error write_buffer_with_signature(void *buf, size_t size, u32 signature);
+	save_error read_buffer_with_signature(const void *buf, size_t size, u32 signature);
 
 private:
 	// state callback item
@@ -327,6 +330,10 @@ private:
 	save_error do_write(T check_space, U write_block, V start_header, W start_data);
 	template <typename T, typename U, typename V, typename W>
 	save_error do_read(T check_length, U read_block, V start_header, W start_data);
+	template <typename T, typename U, typename V, typename W>
+	save_error do_write_known(size_t total_size, u32 signature, T check_space, U write_block, V start_header, W start_data);
+	template <typename T, typename U, typename V, typename W>
+	save_error do_read_known(size_t total_size, u32 signature, T check_length, U read_block, V start_header, W start_data);
 	u32 signature() const;
 	void dump_registry() const;
 	static std::pair<save_error, std::string> validate_header(const u8 *header, const char *gamename, u32 signature);
