@@ -997,6 +997,12 @@ void sound_manager::input_get(int id, sound_stream &stream)
 
 void sound_manager::output_push(int id, sound_stream &stream)
 {
+	if (!kaileron_frame_emits_audio(g_kn_mame_frame_mode.load(std::memory_order_relaxed)))
+	{
+		m_record_samples = 0;
+		return;
+	}
+
 	auto &spk = m_speakers[id];
 	auto &out = spk.m_buffer;
 	auto &inp = stream.m_input_buffer;
@@ -2682,6 +2688,8 @@ void sound_manager::update(s32)
 void sound_manager::streams_update()
 {
 	attotime now = machine().time();
+	bool const emit_audio = kaileron_frame_emits_audio(
+			g_kn_mame_frame_mode.load(std::memory_order_relaxed));
 	{
 #ifndef SOUND_DISABLE_THREADING
 		std::unique_lock<std::mutex> dlock(m_effects_data_mutex);
@@ -2695,13 +2703,16 @@ void sound_manager::streams_update()
 		for(sound_stream *stream : m_ordered_streams)
 			stream->update_nodeps();
 #ifndef SOUND_DISABLE_THREADING
-		m_effects_condition.notify_all();
+		if (emit_audio)
+			m_effects_condition.notify_all();
 #else
-		run_effects();
+		if (emit_audio)
+			run_effects();
 #endif
 	}
 
 	// Send the hooked samples to lua
+	if (emit_audio)
 	{
 		std::map<std::string, std::vector<std::pair<const float *, int>>> sound_data;
 		for(device_sound_interface &sound : sound_interface_enumerator(machine().root_device()))
@@ -2732,10 +2743,13 @@ void sound_manager::streams_update()
 	for(osd_input_stream &stream : m_osd_input_streams)
 		stream.m_buffer.sync();
 
-	machine().osd().add_audio_to_recording(m_record_buffer.data(), m_record_samples);
-	machine().video().add_sound_to_recording(m_record_buffer.data(), m_record_samples);
-	if(m_wavfile)
-		util::wav_add_data_16(*m_wavfile, m_record_buffer.data(), m_record_samples * m_outputs_count);
+	if (emit_audio)
+	{
+		machine().osd().add_audio_to_recording(m_record_buffer.data(), m_record_samples);
+		machine().video().add_sound_to_recording(m_record_buffer.data(), m_record_samples);
+		if(m_wavfile)
+			util::wav_add_data_16(*m_wavfile, m_record_buffer.data(), m_record_samples * m_outputs_count);
+	}
 }
 
 //**// Resampler management

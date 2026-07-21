@@ -13,6 +13,7 @@
 
 #include "emufwd.h"
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -42,12 +43,37 @@ constexpr int EMU_ERR_IDENT_NONE       = 9;    // identified no files
 enum class kaileron_frame_mode
 {
 	authoritative,
-	rollback_replay,
-	speculative
+	rollback_resimulation,
+	spectator_catchup,
+	speculative_presentation
 };
 
-extern bool g_kn_mame_hide_replay_video;
-extern kaileron_frame_mode g_kn_mame_frame_mode;
+// Frame kind and video visibility are intentionally orthogonal.  Catch-up can
+// present selected frames, while speculative presentation can be visible
+// without acquiring authoritative timeline side effects.
+constexpr bool kaileron_frame_runs_notifiers(kaileron_frame_mode mode) noexcept
+{
+	return mode == kaileron_frame_mode::authoritative ||
+			mode == kaileron_frame_mode::spectator_catchup;
+}
+
+constexpr bool kaileron_frame_emits_audio(kaileron_frame_mode mode) noexcept
+{
+	return mode != kaileron_frame_mode::speculative_presentation;
+}
+
+constexpr bool kaileron_frame_runs_plugin_hooks(kaileron_frame_mode mode) noexcept
+{
+	return mode != kaileron_frame_mode::speculative_presentation;
+}
+
+constexpr bool kaileron_frame_updates_presentation_timing(kaileron_frame_mode mode) noexcept
+{
+	return mode != kaileron_frame_mode::speculative_presentation;
+}
+
+extern bool g_kn_mame_hide_video;
+extern std::atomic<kaileron_frame_mode> g_kn_mame_frame_mode;
 
 class emulator_info
 {
