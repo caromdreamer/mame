@@ -221,6 +221,7 @@ void video_manager::frame_update(bool from_debugger)
 		if (phase > machine_phase::INIT)
 			update_frameskip();
 		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		machine().manager().kaileron_frame_done(machine());
 		return;
 	}
 
@@ -265,6 +266,7 @@ void video_manager::frame_update(bool from_debugger)
 	{
 		// perform tasks for this frame
 		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		machine().manager().kaileron_frame_done(machine());
 
 		// update frameskipping
 		if (phase > machine_phase::INIT)

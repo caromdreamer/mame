@@ -89,6 +89,7 @@ public:
 
 	virtual void update_machine() { }
 	virtual bool kaileron_tick(running_machine &machine) { return false; }
+	virtual void kaileron_frame_done(running_machine &machine) { }
 
 	http_manager *http();
 	void start_http_server();

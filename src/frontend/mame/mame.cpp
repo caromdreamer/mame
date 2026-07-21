@@ -376,7 +376,6 @@ void mame_machine_manager::create_custom(running_machine &machine)
 	m_kaileron = kaileron_adapter::create(machine);
 	if (m_kaileron)
 	{
-		machine.add_notifier(MACHINE_NOTIFY_FRAME, machine_notify_delegate(&kaileron_adapter::frame_done, m_kaileron.get()));
 		machine.add_notifier(MACHINE_NOTIFY_EXIT, machine_notify_delegate(&kaileron_adapter::on_exit, m_kaileron.get()));
 	}
 
@@ -421,6 +420,12 @@ bool mame_machine_manager::kaileron_tick(running_machine &machine)
 		return false;
 
 	return m_kaileron->tick();
+}
+
+void mame_machine_manager::kaileron_frame_done(running_machine &machine)
+{
+	if (m_kaileron)
+		m_kaileron->frame_done();
 }
 
 //-------------------------------------------------
