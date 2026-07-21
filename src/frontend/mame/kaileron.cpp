@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "emu.h"
+#include "main.h"
 #include "kaileron_adapter.h"
 
 #include "kaileron.h"
@@ -34,7 +35,6 @@
 #include <thread>
 #include <vector>
 
-extern bool g_kn_mame_hide_replay_video;
 std::string g_kn_mame_status_overlay;
 std::string g_kn_mame_chat_overlay;
 std::string g_kn_mame_chat_input_overlay;
@@ -243,15 +243,13 @@ static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
 	}
 }
 
-u64 fnv1a64(const u8 *bytes, std::size_t len)
+static void fnv1a64_append(u64 &hash, u8 const *bytes, std::size_t len)
 {
-	u64 hash = 1469598103934665603ULL;
-	for (std::size_t i = 0; i < len; i++)
+	for (std::size_t index = 0; index < len; index++)
 	{
-		hash ^= bytes[i];
+		hash ^= bytes[index];
 		hash *= 1099511628211ULL;
 	}
-	return hash;
 }
 
 const char *default_sdk_library_path()
@@ -326,6 +324,7 @@ struct snapshot_slot
 {
 	u32 frame = 0;
 	bool valid = false;
+	u64 state_hash = 0;
 	std::vector<u8> bytes;
 };
 
@@ -359,6 +358,10 @@ struct kaileron_adapter::impl
 	u32 load_count = 0;
 	u32 advance_count = 0;
 	u32 discard_count = 0;
+	u32 pace_sleep_count = 0;
+	u32 frame_notifier_count = 0;
+	u32 rollback_replay_frame_count = 0;
+	u32 speculative_frame_count = 0;
 	u32 injected_frame_count = 0;
 	u32 nonneutral_input_count = 0;
 	u32 last_snapshot_size = 0;
@@ -370,6 +373,7 @@ struct kaileron_adapter::impl
 	u64 load_time_us = 0;
 	u64 advance_time_us = 0;
 	u64 discard_time_us = 0;
+	u64 pace_sleep_time_us = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point last_status_at = {};
@@ -400,7 +404,7 @@ struct kaileron_adapter::impl
 	u32 sdk_pace_delay_us = 0;
 	socd_mode local_socd_mode = socd_mode::up_priority;
 	bool sdk_playback_override = false;
-	bool hide_replay_video = false;
+	bool rollback_replay_active = false;
 	bool show_playback_status = false;
 	bool show_rollback_stats = false;
 };
@@ -880,7 +884,9 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
 	{
-		scripted_digital_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
+		u32 const stop_frame = env_u32("KN_MAME_SCRIPT_INPUT_STOP_FRAME", std::numeric_limits<u32>::max());
+		if (input_frame < stop_frame)
+			scripted_digital_input(out_input->bytes, out_input->len, input_frame, adapter->player_id);
 		adapter->last_local_input = out_input->bytes[0];
 	}
 	return KN_OK;
@@ -888,9 +894,6 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 
 static bool ensure_snapshot_size(kaileron_adapter::impl &adapter)
 {
-	if (adapter.machine.scheduled_event_pending())
-		return false;
-
 	if (adapter.snapshot_size != 0)
 		return true;
 
@@ -924,6 +927,8 @@ static void ensure_snapshot_ring(kaileron_adapter::impl &adapter)
 
 static bool save_machine_state_to_buffer(kaileron_adapter::impl &adapter, std::vector<u8> &bytes)
 {
+	if (adapter.machine.scheduled_event_pending())
+		return false;
 	if (!ensure_snapshot_size(adapter))
 		return false;
 
@@ -934,6 +939,8 @@ static bool save_machine_state_to_buffer(kaileron_adapter::impl &adapter, std::v
 static bool load_machine_state_from_buffer(kaileron_adapter::impl &adapter, const std::vector<u8> &bytes)
 {
 	if (bytes.empty())
+		return false;
+	if (adapter.machine.scheduled_event_pending())
 		return false;
 
 	if (!ensure_snapshot_size(adapter))
@@ -962,16 +969,102 @@ static u32 valid_snapshot_slot_count(kaileron_adapter::impl const &adapter)
 	return count;
 }
 
+static bool unstable_state_entry(char const *name)
+{
+	std::string const entry(name ? name : "");
+	// These entries describe host-side scheduling/buffering or Z80 scratch that
+	// is not initialized until a matching instruction executes.  They are part
+	// of a restorable MAME state, but not a stable cross-process world identity.
+	bool const timer_heap_index = entry.rfind("timer/", 0) == 0 &&
+			entry.size() >= 8 &&
+			entry.compare(entry.size() - 8, 8, "/m_index") == 0;
+	bool const asynchronous_sound_buffer = entry.rfind("stream.sound_stream", 0) == 0;
+	bool const z80_transient_scratch = entry.size() >= 17 &&
+			entry.compare(entry.size() - 17, 17, "/m_shared_data2.w") == 0;
+	return timer_heap_index || asynchronous_sound_buffer || z80_transient_scratch;
+}
+
+static u64 stable_state_buffer_hash(running_machine &machine, std::vector<u8> const &bytes)
+{
+	save_manager &save = machine.save();
+	size_t payload_size = 0;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_item(index, base, value_size, value_count, block_count, stride))
+			return 0;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
+	if (payload_size > bytes.size())
+		return 0;
+
+	u64 hash = 1469598103934665603ULL;
+	size_t offset = bytes.size() - payload_size;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *name = save.indexed_item(index, base, value_size, value_count, block_count, stride);
+		size_t const size = size_t(value_size) * value_count * block_count;
+		if (!name || offset + size > bytes.size())
+			return 0;
+		if (!unstable_state_entry(name))
+		{
+			fnv1a64_append(hash, reinterpret_cast<u8 const *>(name), std::strlen(name));
+			fnv1a64_append(hash, bytes.data() + offset, size);
+		}
+		offset += size;
+	}
+	return hash;
+}
+
+static u64 snapshot_hash(kaileron_adapter::impl &adapter, u32 frame)
+{
+	snapshot_slot *slot = find_snapshot_slot(adapter, frame);
+	return slot ? slot->state_hash : 0;
+}
+
 static u64 average_us(u64 total, u32 count)
 {
 	return count > 0 ? total / count : 0;
 }
 
-static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, bool hide_video)
+class scoped_kaileron_frame
 {
-	bool const previous_hide_replay_video = g_kn_mame_hide_replay_video;
-	if (hide_video)
-		g_kn_mame_hide_replay_video = true;
+public:
+	scoped_kaileron_frame(kaileron_frame_mode mode, bool hide_video) :
+		m_previous_mode(g_kn_mame_frame_mode),
+		m_previous_hide_video(g_kn_mame_hide_replay_video)
+	{
+		g_kn_mame_frame_mode = mode;
+		g_kn_mame_hide_replay_video = hide_video;
+	}
+
+	~scoped_kaileron_frame()
+	{
+		g_kn_mame_frame_mode = m_previous_mode;
+		g_kn_mame_hide_replay_video = m_previous_hide_video;
+	}
+
+private:
+	kaileron_frame_mode const m_previous_mode;
+	bool const m_previous_hide_video;
+};
+
+static KnResult advance_mame_frame(
+		kaileron_adapter::impl &adapter,
+		u32 frame,
+		kaileron_frame_mode mode,
+		bool hide_video)
+{
+	scoped_kaileron_frame const frame_scope(mode, hide_video);
 
 	u32 target_frame = adapter.frame_count + 1;
 	u32 guard = 0;
@@ -984,12 +1077,10 @@ static KnResult advance_mame_frame(kaileron_adapter::impl &adapter, u32 frame, b
 			if (adapter.trace)
 				osd_printf_info("Kaileron trace: advance_frame guard exhausted frame=%u current_mame_frames=%u target_mame_frames=%u guard=%u\n",
 						frame, adapter.frame_count, target_frame, guard);
-			g_kn_mame_hide_replay_video = previous_hide_replay_video;
 			return KN_ERR_CALLBACK;
 		}
 	}
 
-	g_kn_mame_hide_replay_video = previous_hide_replay_video;
 	return KN_OK;
 }
 
@@ -1011,6 +1102,7 @@ static KnResult KN_CALL kn_mame_save_state(void *user, u32 frame)
 		return KN_ERR_CALLBACK;
 
 	slot.frame = frame;
+	slot.state_hash = stable_state_buffer_hash(adapter->machine, slot.bytes);
 	slot.valid = true;
 	adapter->last_snapshot_size = u32(slot.bytes.size());
 	adapter->save_count++;
@@ -1041,7 +1133,7 @@ static KnResult KN_CALL kn_mame_load_state(void *user, u32 frame)
 
 	adapter->load_count++;
 	adapter->load_time_us += elapsed_us(start);
-	adapter->hide_replay_video = true;
+	adapter->rollback_replay_active = true;
 	if (adapter->trace)
 		osd_printf_info("Kaileron trace: load_state done frame=%u load_count=%u\n", frame, adapter->load_count);
 	return KN_OK;
@@ -1082,13 +1174,15 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	bool const skip_catchup_video = adapter->sdk_playback_override &&
 			adapter->sdk_render_interval > 1 &&
 			(frame % adapter->sdk_render_interval) != 0;
-	bool const hide_video = adapter->hide_replay_video || skip_catchup_video;
+	kaileron_frame_mode const mode = adapter->rollback_replay_active ?
+			kaileron_frame_mode::rollback_replay : kaileron_frame_mode::authoritative;
+	bool const hide_video = adapter->rollback_replay_active || skip_catchup_video;
 
 	apply_mapped_inputs(*adapter, players, player_count);
 
 	adapter->in_advance = true;
 	auto const start = std::chrono::steady_clock::now();
-	KnResult result = advance_mame_frame(*adapter, frame, hide_video);
+	KnResult result = advance_mame_frame(*adapter, frame, mode, hide_video);
 	if (result != KN_OK)
 	{
 		adapter->in_advance = false;
@@ -1118,7 +1212,7 @@ static u64 KN_CALL kn_mame_state_hash(void *user)
 	if (adapter->machine.save().write_buffer_with_signature(bytes.data(), bytes.size(), adapter->snapshot_signature) != STATERR_NONE)
 		return 0;
 
-	return fnv1a64(bytes.data(), bytes.size());
+	return stable_state_buffer_hash(adapter->machine, bytes);
 }
 
 static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackControl *control)
@@ -1178,6 +1272,10 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 
 	if (event->type == KN_LIFECYCLE_SESSION_STARTED)
 		show_kaileron_status(adapter->machine, "Kaileron: session started");
+	else if (event->type == KN_LIFECYCLE_ROLLBACK_BEGIN)
+		adapter->rollback_replay_active = true;
+	else if (event->type == KN_LIFECYCLE_ROLLBACK_END)
+		adapter->rollback_replay_active = false;
 	else if (event->type == KN_LIFECYCLE_SESSION_WELCOMED)
 		show_kaileron_status(adapter->machine, "Kaileron: connected");
 	else if (event->type == KN_LIFECYCLE_SESSION_STARTING)
@@ -1583,10 +1681,10 @@ bool kaileron_adapter::tick()
 	poll_chat_inbox(*m_impl);
 	refresh_chat_overlay(*m_impl);
 	process_chat_input(*m_impl);
-	m_impl->hide_replay_video = false;
+	m_impl->rollback_replay_active = false;
 	m_impl->sdk_pace_delay_us = 0;
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
-	m_impl->hide_replay_video = false;
+	m_impl->rollback_replay_active = false;
 	if (result == KN_ERR_REPLAY_COMPLETE)
 	{
 		osd_printf_info("Kaileron: replay complete\n");
@@ -1602,14 +1700,27 @@ bool kaileron_adapter::tick()
 	{
 		update_playback_status_overlay(*m_impl);
 		if (m_impl->networked && m_impl->sdk_pace_delay_us > 0)
+		{
+			m_impl->pace_sleep_count++;
+			m_impl->pace_sleep_time_us += m_impl->sdk_pace_delay_us;
 			std::this_thread::sleep_for(std::chrono::microseconds(m_impl->sdk_pace_delay_us));
+		}
 	}
 	return true;
 }
 
-void kaileron_adapter::frame_done()
+void kaileron_adapter::frame_done(kaileron_frame_mode mode)
 {
 	m_impl->frame_count++;
+	if (mode == kaileron_frame_mode::rollback_replay)
+		m_impl->rollback_replay_frame_count++;
+	else if (mode == kaileron_frame_mode::speculative)
+		m_impl->speculative_frame_count++;
+}
+
+void kaileron_adapter::frame_notifier()
+{
+	m_impl->frame_notifier_count++;
 }
 
 void kaileron_adapter::on_exit()
@@ -1632,12 +1743,18 @@ void kaileron_adapter::on_exit()
 	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
-				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx missing=%u nacks=%u\n",
+				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u stalls=%u pace_sleeps=%u pace_sleep_us=%llu frame_notifiers=%u rollback_replay_frames=%u speculative_frames=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx confirmed_state_frame=%u confirmed_state_hash=%016llx missing=%u nacks=%u\n",
 				metrics.current_frame,
 				m_impl->frame_count,
 				metrics.confirmed_frame_count,
 				metrics.rollback_count,
 				metrics.max_rollback_frames,
+				metrics.prediction_stall_frames,
+				m_impl->pace_sleep_count,
+				(unsigned long long)m_impl->pace_sleep_time_us,
+				m_impl->frame_notifier_count,
+				m_impl->rollback_replay_frame_count,
+				m_impl->speculative_frame_count,
 				m_impl->save_count,
 				m_impl->load_count,
 				m_impl->advance_count,
@@ -1654,6 +1771,8 @@ void kaileron_adapter::on_exit()
 				m_impl->discard_count,
 				(unsigned long long)metrics.confirmed_input_hash,
 				(unsigned long long)metrics.current_state_hash,
+				metrics.confirmed_frame_count,
+				(unsigned long long)snapshot_hash(*m_impl, metrics.confirmed_frame_count),
 				metrics.confirmed_missing_frames,
 				metrics.confirmed_nack_sent);
 	}

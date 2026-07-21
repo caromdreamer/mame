@@ -43,6 +43,7 @@
 //**************************************************************************
 
 bool g_kn_mame_hide_replay_video = false;
+kaileron_frame_mode g_kn_mame_frame_mode = kaileron_frame_mode::authoritative;
 
 // frameskipping tables
 const bool video_manager::s_skiptable[FRAMESKIP_LEVELS][FRAMESKIP_LEVELS] =
@@ -218,10 +219,13 @@ void video_manager::frame_update(bool from_debugger)
 	machine_phase const phase = machine().phase();
 	if (g_kn_mame_hide_replay_video && !from_debugger)
 	{
-		if (phase > machine_phase::INIT)
-			update_frameskip();
-		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
-		machine().manager().kaileron_frame_done(machine());
+		if (g_kn_mame_frame_mode == kaileron_frame_mode::authoritative)
+		{
+			if (phase > machine_phase::INIT)
+				update_frameskip();
+			machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		}
+		machine().manager().kaileron_frame_done(machine(), g_kn_mame_frame_mode);
 		return;
 	}
 
@@ -265,8 +269,9 @@ void video_manager::frame_update(bool from_debugger)
 	if (!from_debugger)
 	{
 		// perform tasks for this frame
-		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
-		machine().manager().kaileron_frame_done(machine());
+		if (g_kn_mame_frame_mode == kaileron_frame_mode::authoritative)
+			machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		machine().manager().kaileron_frame_done(machine(), g_kn_mame_frame_mode);
 
 		// update frameskipping
 		if (phase > machine_phase::INIT)

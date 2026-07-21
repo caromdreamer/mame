@@ -39,6 +39,16 @@ constexpr int EMU_ERR_IDENT_NONE       = 9;    // identified no files
 //    TYPE DEFINITIONS
 //**************************************************************************
 
+enum class kaileron_frame_mode
+{
+	authoritative,
+	rollback_replay,
+	speculative
+};
+
+extern bool g_kn_mame_hide_replay_video;
+extern kaileron_frame_mode g_kn_mame_frame_mode;
+
 class emulator_info
 {
 public:
@@ -89,7 +99,7 @@ public:
 
 	virtual void update_machine() { }
 	virtual bool kaileron_tick(running_machine &machine) { return false; }
-	virtual void kaileron_frame_done(running_machine &machine) { }
+	virtual void kaileron_frame_done(running_machine &machine, kaileron_frame_mode mode) { }
 
 	http_manager *http();
 	void start_http_server();
