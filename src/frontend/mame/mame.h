@@ -61,6 +61,7 @@ public:
 
 	virtual void before_load_settings(running_machine& machine) override;
 	virtual bool kaileron_tick(running_machine &machine) override;
+	virtual void kaileron_frame_done(running_machine &machine, kaileron_frame_mode mode) override;
 
 	std::vector<std::reference_wrapper<const std::string>> missing_mandatory_images();
 

@@ -42,7 +42,8 @@
 //  GLOBAL VARIABLES
 //**************************************************************************
 
-bool g_kn_mame_hide_replay_video = false;
+bool g_kn_mame_hide_video = false;
+std::atomic<kaileron_frame_mode> g_kn_mame_frame_mode{kaileron_frame_mode::authoritative};
 
 // frameskipping tables
 const bool video_manager::s_skiptable[FRAMESKIP_LEVELS][FRAMESKIP_LEVELS] =
@@ -216,11 +217,17 @@ void video_manager::frame_update(bool from_debugger)
 {
 	// only render sound and video if we're in the running phase
 	machine_phase const phase = machine().phase();
-	if (g_kn_mame_hide_replay_video && !from_debugger)
+	kaileron_frame_mode const frame_mode = g_kn_mame_frame_mode.load(std::memory_order_relaxed);
+	bool const update_presentation_timing = kaileron_frame_updates_presentation_timing(frame_mode);
+	if (g_kn_mame_hide_video && !from_debugger)
 	{
-		if (phase > machine_phase::INIT)
-			update_frameskip();
-		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		if (kaileron_frame_runs_notifiers(frame_mode))
+		{
+			if (phase > machine_phase::INIT)
+				update_frameskip();
+			machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		}
+		machine().manager().kaileron_frame_done(machine(), frame_mode);
 		return;
 	}
 
@@ -233,7 +240,8 @@ void video_manager::frame_update(bool from_debugger)
 	anything_changed = emulator_info::draw_user_interface(machine()) || anything_changed;
 
 	// let plugins draw over the UI
-	anything_changed = emulator_info::frame_hook() || anything_changed;
+	if (kaileron_frame_runs_plugin_hooks(frame_mode))
+		anything_changed = emulator_info::frame_hook() || anything_changed;
 
 	// if none of the screens changed and we haven't skipped too many frames in a row,
 	// mark this frame as skipped to prevent throttling; this helps for games that
@@ -245,7 +253,7 @@ void video_manager::frame_update(bool from_debugger)
 
 	// if we're throttling, synchronize before rendering
 	attotime current_time = machine().time();
-	if (!from_debugger && phase > machine_phase::INIT && !m_low_latency && effective_throttle())
+	if (update_presentation_timing && !from_debugger && phase > machine_phase::INIT && !m_low_latency && effective_throttle())
 		update_throttle(current_time);
 
 	// ask the OSD to update
@@ -255,7 +263,7 @@ void video_manager::frame_update(bool from_debugger)
 	}
 
 	// we synchronize after rendering instead of before, if low latency mode is enabled
-	if (!from_debugger && phase > machine_phase::INIT && m_low_latency && effective_throttle())
+	if (update_presentation_timing && !from_debugger && phase > machine_phase::INIT && m_low_latency && effective_throttle())
 		update_throttle(current_time);
 
 	machine().osd().input_update(false);
@@ -264,14 +272,16 @@ void video_manager::frame_update(bool from_debugger)
 	if (!from_debugger)
 	{
 		// perform tasks for this frame
-		machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		if (kaileron_frame_runs_notifiers(frame_mode))
+			machine().call_notifiers(MACHINE_NOTIFY_FRAME);
+		machine().manager().kaileron_frame_done(machine(), frame_mode);
 
 		// update frameskipping
-		if (phase > machine_phase::INIT)
+		if (update_presentation_timing && phase > machine_phase::INIT)
 			update_frameskip();
 
 		// update speed computations
-		if (!skipped_it && phase > machine_phase::INIT)
+		if (update_presentation_timing && !skipped_it && phase > machine_phase::INIT)
 			recompute_speed(current_time);
 	}
 

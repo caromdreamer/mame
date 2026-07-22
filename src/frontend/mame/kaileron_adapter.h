@@ -9,6 +9,8 @@
 
 #include <memory>
 
+enum class kaileron_frame_mode;
+
 class kaileron_adapter
 {
 public:
@@ -19,7 +21,8 @@ public:
 
 	bool initialize();
 	bool tick();
-	void frame_done();
+	void frame_done(kaileron_frame_mode mode);
+	void frame_notifier();
 	void on_exit();
 
 public:
