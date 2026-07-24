@@ -13,9 +13,9 @@ struct kaileron_frame_request
 	kaileron_frame_mode mode = kaileron_frame_mode::authoritative;
 	bool present_video = true;
 
-	static constexpr kaileron_frame_request authoritative() noexcept
+	static constexpr kaileron_frame_request authoritative(bool present = true) noexcept
 	{
-		return { kaileron_frame_mode::authoritative, true };
+		return { kaileron_frame_mode::authoritative, present };
 	}
 
 	static constexpr kaileron_frame_request rollback_resimulation() noexcept

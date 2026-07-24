@@ -73,6 +73,7 @@ constexpr bool kaileron_frame_updates_presentation_timing(kaileron_frame_mode mo
 }
 
 extern bool g_kn_mame_hide_video;
+extern bool g_kn_mame_presentation_state_io;
 extern std::atomic<kaileron_frame_mode> g_kn_mame_frame_mode;
 
 class emulator_info
