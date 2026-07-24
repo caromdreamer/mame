@@ -77,7 +77,10 @@ kaileron_frame_runner::kaileron_frame_runner(running_machine &machine) :
 bool kaileron_frame_runner::advance(u32 sdk_frame, kaileron_frame_request request)
 {
 	scoped_kaileron_frame const frame_scope(request);
-	u32 const target_completed_frames = m_completed_frame_count + 1;
+	bool const speculative = request.mode == kaileron_frame_mode::speculative_presentation;
+	u32 const target_completed_frames = speculative
+			? m_speculative_presentation_count + 1
+			: m_completed_frame_count + 1;
 	u32 const guard_limit = advance_guard_limit();
 	u32 guard = 0;
 	auto const start = std::chrono::steady_clock::now();
@@ -90,7 +93,10 @@ bool kaileron_frame_runner::advance(u32 sdk_frame, kaileron_frame_request reques
 				request.present_video ? 1 : 0,
 				m_completed_frame_count);
 
-	while (m_completed_frame_count < target_completed_frames && !m_machine.scheduled_event_pending())
+	while ((speculative
+			? m_speculative_presentation_count
+			: m_completed_frame_count) < target_completed_frames &&
+			!m_machine.scheduled_event_pending())
 	{
 		m_machine.scheduler().timeslice();
 		if (++guard > guard_limit)
@@ -121,13 +127,17 @@ bool kaileron_frame_runner::advance(u32 sdk_frame, kaileron_frame_request reques
 
 void kaileron_frame_runner::frame_done(kaileron_frame_mode mode) noexcept
 {
+	if (mode == kaileron_frame_mode::speculative_presentation)
+	{
+		m_speculative_presentation_count++;
+		return;
+	}
+
 	m_completed_frame_count++;
 	if (mode == kaileron_frame_mode::rollback_resimulation)
 		m_rollback_resimulation_count++;
 	else if (mode == kaileron_frame_mode::spectator_catchup)
 		m_spectator_catchup_count++;
-	else if (mode == kaileron_frame_mode::speculative_presentation)
-		m_speculative_presentation_count++;
 }
 
 u64 kaileron_frame_runner::average_advance_us() const noexcept

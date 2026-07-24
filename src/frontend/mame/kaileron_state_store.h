@@ -19,11 +19,17 @@ public:
 	bool save(u32 frame);
 	bool load(u32 frame, u32 completed_frame_count);
 	void discard_before(u32 frame);
+	bool save_presentation();
+	bool restore_presentation();
+	bool verify_presentation_restore();
 	u64 current_state_hash();
 	u64 snapshot_hash(u32 frame) const noexcept;
+	u64 presentation_snapshot_hash() const noexcept { return m_presentation_snapshot_hash; }
 
 	u32 save_count() const noexcept { return m_save_count; }
 	u32 load_count() const noexcept { return m_load_count; }
+	u32 presentation_save_count() const noexcept { return m_presentation_save_count; }
+	u32 presentation_restore_count() const noexcept { return m_presentation_restore_count; }
 	u32 discard_count() const noexcept { return m_discard_count; }
 	u32 last_snapshot_size() const noexcept { return m_last_snapshot_size; }
 	u32 valid_slot_count() const noexcept;
@@ -51,16 +57,20 @@ private:
 
 	running_machine &m_machine;
 	std::vector<snapshot_slot> m_snapshots;
+	std::vector<u8> m_presentation_snapshot;
 	size_t m_snapshot_size = 0;
 	u32 m_snapshot_capacity = 0;
 	u32 m_snapshot_signature = 0;
 	u32 m_save_count = 0;
 	u32 m_load_count = 0;
+	u32 m_presentation_save_count = 0;
+	u32 m_presentation_restore_count = 0;
 	u32 m_discard_count = 0;
 	u32 m_last_snapshot_size = 0;
 	u64 m_save_time_us = 0;
 	u64 m_load_time_us = 0;
 	u64 m_discard_time_us = 0;
+	u64 m_presentation_snapshot_hash = 0;
 	bool m_trace = false;
 };
 

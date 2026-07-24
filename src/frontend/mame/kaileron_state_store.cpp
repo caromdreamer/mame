@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "emu.h"
+#include "main.h"
 
 #include "kaileron_state_store.h"
 
@@ -41,6 +42,24 @@ bool unstable_state_entry(char const *name)
 			entry.compare(entry.size() - 17, 17, "/m_shared_data2.w") == 0;
 	return timer_heap_index || asynchronous_sound_buffer || z80_transient_scratch;
 }
+
+class scoped_presentation_state_io
+{
+public:
+	scoped_presentation_state_io() :
+		m_previous(g_kn_mame_presentation_state_io)
+	{
+		g_kn_mame_presentation_state_io = true;
+	}
+
+	~scoped_presentation_state_io()
+	{
+		g_kn_mame_presentation_state_io = m_previous;
+	}
+
+private:
+	bool const m_previous;
+};
 
 } // anonymous namespace
 
@@ -219,6 +238,100 @@ void kaileron_state_store::discard_before(u32 frame)
 	}
 	m_discard_count += discarded;
 	m_discard_time_us += elapsed_us(start);
+}
+
+bool kaileron_state_store::save_presentation()
+{
+	scoped_presentation_state_io const state_io_scope;
+	if (!save_machine_state(m_presentation_snapshot))
+		return false;
+
+	m_presentation_snapshot_hash = stable_state_hash(m_presentation_snapshot);
+	m_presentation_save_count++;
+	return true;
+}
+
+bool kaileron_state_store::restore_presentation()
+{
+	if (m_presentation_snapshot.empty() || !ensure_snapshot_size())
+		return false;
+
+	scoped_presentation_state_io const state_io_scope;
+	// Presentation may process a user-requested exit while drawing its visible
+	// frame.  Restore the authoritative machine state even when that external
+	// request is pending; the request itself intentionally remains pending.
+	if (m_machine.save().read_buffer_with_signature(
+			m_presentation_snapshot.data(),
+			m_presentation_snapshot.size(),
+			m_snapshot_signature) != STATERR_NONE)
+		return false;
+
+	m_presentation_restore_count++;
+	return true;
+}
+
+bool kaileron_state_store::verify_presentation_restore()
+{
+	if (m_presentation_snapshot.empty() || !ensure_snapshot_size())
+		return false;
+
+	save_manager &save = m_machine.save();
+	size_t payload_size = 0;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_item(index, base, value_size, value_count, block_count, stride))
+			return false;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
+	if (payload_size > m_presentation_snapshot.size())
+		return false;
+
+	u32 differences = 0;
+	size_t offset = m_presentation_snapshot.size() - payload_size;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *name = save.indexed_item(index, base, value_size, value_count, block_count, stride);
+		size_t const block_size = size_t(value_size) * value_count;
+		size_t const size = block_size * block_count;
+		if (!name || !base || offset + size > m_presentation_snapshot.size())
+			return false;
+		bool changed = false;
+		u8 const *live = static_cast<u8 const *>(base);
+		for (u32 block = 0; block < block_count; block++)
+		{
+			if (std::memcmp(
+					m_presentation_snapshot.data() + offset,
+					live,
+					block_size) != 0)
+				changed = true;
+			offset += block_size;
+			live += stride;
+		}
+		if (!unstable_state_entry(name) && changed)
+		{
+			if (differences < 16)
+				osd_printf_error(
+						"Kaileron: runahead restore changed state entry=%s size=%u\n",
+						name,
+						u32(size));
+			differences++;
+		}
+	}
+	if (differences)
+		osd_printf_error(
+				"Kaileron: runahead restore changed stable_entries=%u\n",
+				differences);
+	return differences == 0;
 }
 
 u64 kaileron_state_store::current_state_hash()

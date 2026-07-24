@@ -43,6 +43,7 @@
 //**************************************************************************
 
 bool g_kn_mame_hide_video = false;
+bool g_kn_mame_presentation_state_io = false;
 std::atomic<kaileron_frame_mode> g_kn_mame_frame_mode{kaileron_frame_mode::authoritative};
 
 // frameskipping tables
@@ -228,6 +229,12 @@ void video_manager::frame_update(bool from_debugger)
 			machine().call_notifiers(MACHINE_NOTIFY_FRAME);
 		}
 		machine().manager().kaileron_frame_done(machine(), frame_mode);
+		// Runahead hides the authoritative frame, but speed accounting and
+		// time-based exit checks must still follow authoritative emulation time.
+		// The speculative visible frame deliberately skips these side effects.
+		if (frame_mode == kaileron_frame_mode::authoritative &&
+				phase > machine_phase::INIT)
+			recompute_speed(machine().time());
 		return;
 	}
 
@@ -267,7 +274,8 @@ void video_manager::frame_update(bool from_debugger)
 		update_throttle(current_time);
 
 	machine().osd().input_update(false);
-	emulator_info::periodic_check();
+	if (kaileron_frame_runs_plugin_hooks(frame_mode))
+		emulator_info::periodic_check();
 
 	if (!from_debugger)
 	{

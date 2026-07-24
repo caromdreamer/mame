@@ -24,6 +24,7 @@
 #include "emuopts.h"
 #include "fileio.h"
 #include "inputdev.h"
+#include "main.h"
 #include "natkeyboard.h"
 #include "screen.h"
 #include "softlist.h"
@@ -692,11 +693,23 @@ void lua_engine::on_machine_frame()
 
 void lua_engine::on_machine_presave()
 {
+	// Presentation snapshots are private to Kaileron runahead.  Speculative
+	// frames do not run Lua hooks, so invoking plugin save callbacks here would
+	// be an additional permanent side effect rather than part of presentation.
+	if (g_kn_mame_presentation_state_io)
+		return;
+
 	m_notifiers->on_presave();
 }
 
 void lua_engine::on_machine_postload()
 {
+	// The Lua VM and its waiting-task list are intentionally untouched during
+	// speculative presentation.  Keep them intact and allow the serialized
+	// scheduler timer to be restored instead of resetting it every video frame.
+	if (g_kn_mame_presentation_state_io)
+		return;
+
 	// clear waiting tasks
 	m_timer->reset();
 	std::vector<int> expired;
