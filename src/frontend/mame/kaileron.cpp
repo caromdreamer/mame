@@ -1419,7 +1419,7 @@ bool kaileron_adapter::initialize()
 	m_impl->state_store.set_trace(m_impl->trace);
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
 	bool const replay_playback = env_enabled("KN_REPLAY_PLAYBACK");
-	u32 const requested_runahead = std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 1);
+	u32 const requested_runahead = std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 4);
 	m_impl->runahead_frames = (!m_impl->spectator && !replay_playback)
 			? requested_runahead
 			: 0;
