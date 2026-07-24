@@ -222,6 +222,15 @@ void video_manager::frame_update(bool from_debugger)
 	bool const update_presentation_timing = kaileron_frame_updates_presentation_timing(frame_mode);
 	if (g_kn_mame_hide_video && !from_debugger)
 	{
+		attotime const current_time = machine().time();
+		// Presentation runahead hides the authoritative frame, but it must not
+		// hide the one throttle point that keeps emulated time tied to real
+		// time.  The visible speculative frame deliberately does not throttle.
+		if (frame_mode == kaileron_frame_mode::authoritative &&
+				phase > machine_phase::INIT &&
+				!m_low_latency &&
+				effective_throttle())
+			update_throttle(current_time);
 		if (kaileron_frame_runs_notifiers(frame_mode))
 		{
 			if (phase > machine_phase::INIT)
@@ -234,7 +243,7 @@ void video_manager::frame_update(bool from_debugger)
 		// The speculative visible frame deliberately skips these side effects.
 		if (frame_mode == kaileron_frame_mode::authoritative &&
 				phase > machine_phase::INIT)
-			recompute_speed(machine().time());
+			recompute_speed(current_time);
 		return;
 	}
 
@@ -270,7 +279,13 @@ void video_manager::frame_update(bool from_debugger)
 	}
 
 	// we synchronize after rendering instead of before, if low latency mode is enabled
-	if (update_presentation_timing && !from_debugger && phase > machine_phase::INIT && m_low_latency && effective_throttle())
+	bool const low_latency_presentation_throttle =
+			frame_mode == kaileron_frame_mode::speculative_presentation;
+	if ((update_presentation_timing || low_latency_presentation_throttle) &&
+			!from_debugger &&
+			phase > machine_phase::INIT &&
+			m_low_latency &&
+			effective_throttle())
 		update_throttle(current_time);
 
 	machine().osd().input_update(false);
@@ -560,6 +575,11 @@ void video_manager::screenless_update_callback(s32 param)
 
 void video_manager::postload()
 {
+	// Presentation restore rewinds machine state after drawing a speculative
+	// frame.  It must not reset permanent host-side timing every video frame.
+	if (g_kn_mame_presentation_state_io)
+		return;
+
 	attotime const emutime = machine().time();
 	for (const auto &x : m_movie_recordings)
 		x->set_next_frame_time(emutime);
