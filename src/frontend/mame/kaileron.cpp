@@ -1067,6 +1067,10 @@ static const char *lifecycle_event_name(u32 type)
 		return "session_left";
 	case KN_LIFECYCLE_PEER_LEFT:
 		return "peer_left";
+	case KN_LIFECYCLE_OBSERVER_PREPARING:
+		return "observer_preparing";
+	case KN_LIFECYCLE_OBSERVER_READY:
+		return "observer_ready";
 	case KN_LIFECYCLE_ROLLBACK_BEGIN:
 		return "rollback_begin";
 	case KN_LIFECYCLE_ROLLBACK_END:
