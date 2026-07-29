@@ -8,7 +8,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -37,10 +41,51 @@ bool unstable_state_entry(char const *name)
 	bool const timer_heap_index = entry.rfind("timer/", 0) == 0 &&
 			entry.size() >= 8 &&
 			entry.compare(entry.size() - 8, 8, "/m_index") == 0;
+	bool const lua_scheduler_timer = entry.rfind("timer/lua_engine::resume/", 0) == 0;
+	// The output manager mirrors lamps and LEDs for host presentation.  Device
+	// postload handlers can immediately regenerate these values from core state.
+	bool const derived_host_output = entry.rfind("output/", 0) == 0;
 	bool const asynchronous_sound_buffer = entry.rfind("stream.sound_stream", 0) == 0;
 	bool const z80_transient_scratch = entry.size() >= 17 &&
 			entry.compare(entry.size() - 17, 17, "/m_shared_data2.w") == 0;
-	return timer_heap_index || asynchronous_sound_buffer || z80_transient_scratch;
+	return timer_heap_index ||
+			lua_scheduler_timer ||
+			derived_host_output ||
+			asynchronous_sound_buffer ||
+			z80_transient_scratch;
+}
+
+bool write_binary_file(std::string const &path, std::vector<u8> const &bytes)
+{
+	std::filesystem::path const target(path);
+	std::filesystem::path temporary(target);
+	temporary += ".tmp";
+	std::error_code error;
+	if (!target.parent_path().empty())
+	{
+		std::filesystem::create_directories(target.parent_path(), error);
+		if (error)
+			return false;
+	}
+
+	{
+		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+		if (!output)
+			return false;
+		output.write(reinterpret_cast<char const *>(bytes.data()), std::streamsize(bytes.size()));
+		if (!output)
+			return false;
+	}
+
+	std::filesystem::remove(target, error);
+	error.clear();
+	std::filesystem::rename(temporary, target, error);
+	if (error)
+	{
+		std::filesystem::remove(temporary, error);
+		return false;
+	}
+	return true;
 }
 
 class scoped_presentation_state_io
@@ -76,15 +121,24 @@ void kaileron_state_store::set_capacity(u32 capacity) noexcept
 
 bool kaileron_state_store::ensure_snapshot_size()
 {
-	if (m_snapshot_size != 0)
-		return true;
-
 	size_t const size = ram_state::get_size(m_machine.save());
 	if (size == 0 || size > std::numeric_limits<u32>::max())
 		return false;
 
+	u32 const signature = m_machine.save().state_signature();
+	if (m_snapshot_size == size && m_snapshot_signature == signature)
+		return true;
+
+	// Save registrations can still change while the machine is starting.  Never
+	// retain buffers sized from an earlier registration set.
+	if (m_snapshot_size != 0)
+	{
+		m_snapshots.clear();
+		m_presentation_snapshot.clear();
+		m_presentation_snapshot_hash = 0;
+	}
 	m_snapshot_size = size;
-	m_snapshot_signature = m_machine.save().state_signature();
+	m_snapshot_signature = signature;
 	m_last_snapshot_size = u32(size);
 	return true;
 }
@@ -183,9 +237,15 @@ bool kaileron_state_store::save(u32 frame)
 		osd_printf_info("Kaileron trace: save_state frame=%u\n", frame);
 
 	auto const start = std::chrono::steady_clock::now();
+	if (!ensure_snapshot_size())
+		return false;
 	ensure_snapshot_ring();
 	snapshot_slot &slot = m_snapshots[frame % m_snapshot_capacity];
-	if (!save_machine_state(slot.bytes))
+	slot.bytes.resize(m_snapshot_size);
+	if (m_machine.save().write_buffer_with_signature(
+			slot.bytes.data(),
+			slot.bytes.size(),
+			m_snapshot_signature) != STATERR_NONE)
 		return false;
 
 	slot.frame = frame;
@@ -332,6 +392,158 @@ bool kaileron_state_store::verify_presentation_restore()
 				"Kaileron: runahead restore changed stable_entries=%u\n",
 				differences);
 	return differences == 0;
+}
+
+bool kaileron_state_store::export_current(std::string const &path, u64 &state_hash)
+{
+	std::vector<u8> bytes;
+	if (!save_machine_state(bytes))
+		return false;
+
+	state_hash = stable_state_hash(bytes);
+	if (!state_hash)
+		return false;
+	return write_binary_file(path, bytes);
+}
+
+bool kaileron_state_store::import_current(std::string const &path, u64 &state_hash)
+{
+	if (m_machine.scheduled_event_pending() || !ensure_snapshot_size())
+		return false;
+
+	std::ifstream input(path, std::ios::binary | std::ios::ate);
+	if (!input || input.tellg() != std::streamoff(m_snapshot_size))
+		return false;
+	input.seekg(0);
+	std::vector<u8> bytes(m_snapshot_size);
+	input.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size()));
+	if (!input)
+		return false;
+
+	if (m_machine.save().read_buffer_with_signature(
+			bytes.data(), bytes.size(), m_snapshot_signature) != STATERR_NONE)
+		return false;
+
+	for (snapshot_slot &slot : m_snapshots)
+		slot.valid = false;
+	m_presentation_snapshot.clear();
+	m_presentation_snapshot_hash = 0;
+	state_hash = current_state_hash();
+	return state_hash != 0;
+}
+
+bool kaileron_state_store::write_current_manifest(std::string const &path, u32 frame)
+{
+	if (m_machine.scheduled_event_pending() || !ensure_snapshot_size())
+		return false;
+
+	std::vector<u8> bytes(m_snapshot_size);
+	if (m_machine.save().write_buffer_with_signature(
+			bytes.data(), bytes.size(), m_snapshot_signature) != STATERR_NONE)
+		return false;
+	return write_manifest(path, frame, bytes);
+}
+
+bool kaileron_state_store::export_snapshot(
+		u32 frame,
+		std::string const &path,
+		u64 &state_hash)
+{
+	snapshot_slot const *slot = find_slot(frame);
+	if (!slot)
+		return false;
+	state_hash = slot->state_hash;
+	return state_hash != 0 && write_binary_file(path, slot->bytes);
+}
+
+bool kaileron_state_store::write_snapshot_manifest(u32 frame, std::string const &path)
+{
+	snapshot_slot const *slot = find_slot(frame);
+	return slot && write_manifest(path, frame, slot->bytes);
+}
+
+bool kaileron_state_store::write_manifest(
+		std::string const &path,
+		u32 frame,
+		std::vector<u8> const &bytes)
+{
+	save_manager &save = m_machine.save();
+	size_t payload_size = 0;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_item(index, base, value_size, value_count, block_count, stride))
+			return false;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
+	if (payload_size > bytes.size())
+		return false;
+
+	std::filesystem::path const target(path);
+	std::filesystem::path temporary(target);
+	temporary += ".tmp";
+	std::error_code error;
+	if (!target.parent_path().empty())
+	{
+		std::filesystem::create_directories(target.parent_path(), error);
+		if (error)
+			return false;
+	}
+
+	std::ofstream output(temporary, std::ios::trunc);
+	if (!output)
+		return false;
+	output << "# frame\t" << frame << "\n";
+	output << "# aggregate\t" << std::hex << std::setw(16) << std::setfill('0')
+		   << stable_state_hash(bytes) << std::dec << "\n";
+	output << "name\tstable\tsize\thash\n";
+
+	size_t offset = bytes.size() - payload_size;
+	for (int index = 0; index < save.registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *raw_name = save.indexed_item(
+				index, base, value_size, value_count, block_count, stride);
+		size_t const size = size_t(value_size) * value_count * block_count;
+		if (!raw_name || offset + size > bytes.size())
+			return false;
+
+		std::string name(raw_name);
+		std::replace_if(name.begin(), name.end(), [] (char ch) {
+			return ch == '\t' || ch == '\r' || ch == '\n';
+		}, ' ');
+		u64 hash = 1469598103934665603ULL;
+		fnv1a64_append(hash, reinterpret_cast<u8 const *>(raw_name), std::strlen(raw_name));
+		fnv1a64_append(hash, bytes.data() + offset, size);
+		output << name << '\t'
+			   << (unstable_state_entry(raw_name) ? 0 : 1) << '\t'
+			   << size << '\t'
+			   << std::hex << std::setw(16) << std::setfill('0') << hash << std::dec << '\n';
+		offset += size;
+	}
+	if (!output)
+		return false;
+	output.close();
+	if (!output)
+		return false;
+
+	std::filesystem::remove(target, error);
+	error.clear();
+	std::filesystem::rename(temporary, target, error);
+	if (error)
+	{
+		std::filesystem::remove(temporary, error);
+		return false;
+	}
+	return true;
 }
 
 u64 kaileron_state_store::current_state_hash()
