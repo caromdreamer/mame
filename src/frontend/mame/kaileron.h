@@ -194,7 +194,24 @@ typedef struct KnCallbacks {
   */
   void(KN_CALL *on_lifecycle_event)(void *user,
                                     const KnLifecycleEvent *event);
-  uint32_t reserved[7];
+
+  /*
+    Optional complete-state transfer hooks. When all three are provided for a
+    networked lobby session, the SDK elects the first authenticated active
+    player upload as the frame-zero checkpoint before anyone reports ready.
+  */
+  uint32_t(KN_CALL *serialized_state_size)(void *user);
+  KnResult(KN_CALL *export_serialized_state)(void *user,
+                                             uint8_t *bytes,
+                                             uint32_t len);
+  KnResult(KN_CALL *import_serialized_state)(void *user,
+                                             const uint8_t *bytes,
+                                             uint32_t len);
+#if UINTPTR_MAX == UINT64_MAX
+  uint32_t reserved[1];
+#else
+  uint32_t reserved[4];
+#endif
 } KnCallbacks;
 
 typedef struct KnConfig {

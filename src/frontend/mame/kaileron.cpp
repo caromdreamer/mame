@@ -351,6 +351,7 @@ struct kaileron_adapter::impl
 	std::chrono::steady_clock::time_point last_chat_poll_at = {};
 	std::vector<mapped_input_field> input_map;
 	std::vector<std::vector<u8>> presentation_inputs;
+	std::vector<u8> remote_bootstrap_buffer;
 	std::string last_status_text;
 	std::string chat_inbox_path;
 	std::string chat_outbox_path;
@@ -386,6 +387,7 @@ struct kaileron_adapter::impl
 	bool show_playback_status = false;
 	bool show_rollback_stats = false;
 	bool fixed_rtc_enabled = false;
+	bool remote_bootstrap_enabled = false;
 	bool determinism_bootstrap_ready = false;
 	std::array<bool, 3> determinism_checkpoints_written = {false, false, false};
 };
@@ -462,6 +464,8 @@ static determinism_bootstrap_result prepare_determinism_bootstrap(
 		kaileron_adapter::impl &adapter)
 {
 	if (adapter.determinism_dir.empty() || adapter.determinism_bootstrap_ready)
+		return determinism_bootstrap_result::ready;
+	if (adapter.remote_bootstrap_enabled)
 		return determinism_bootstrap_result::ready;
 
 	std::string const bootstrap_path = determinism_path(adapter, "bootstrap.bin");
@@ -1163,6 +1167,49 @@ static u64 KN_CALL kn_mame_state_hash(void *user)
 	return adapter->state_store.current_state_hash();
 }
 
+static u32 KN_CALL kn_mame_serialized_state_size(void *user)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	u64 state_hash = 0;
+	adapter.remote_bootstrap_buffer.clear();
+	if (!adapter.state_store.export_current(adapter.remote_bootstrap_buffer, state_hash))
+		return 0;
+	if (adapter.remote_bootstrap_buffer.size() > std::numeric_limits<u32>::max())
+	{
+		adapter.remote_bootstrap_buffer.clear();
+		return 0;
+	}
+	return u32(adapter.remote_bootstrap_buffer.size());
+}
+
+static KnResult KN_CALL kn_mame_export_serialized_state(void *user, u8 *bytes, u32 len)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	if (!bytes || adapter.remote_bootstrap_buffer.size() != len)
+		return KN_ERR_INVALID_ARGUMENT;
+	std::memcpy(bytes, adapter.remote_bootstrap_buffer.data(), len);
+	adapter.remote_bootstrap_buffer.clear();
+	return KN_OK;
+}
+
+static KnResult KN_CALL kn_mame_import_serialized_state(void *user, u8 const *bytes, u32 len)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	u64 state_hash = 0;
+	adapter.remote_bootstrap_buffer.clear();
+	if (!adapter.state_store.import_current(bytes, len, state_hash))
+		return KN_ERR_CALLBACK;
+	if (!adapter.determinism_dir.empty() &&
+			!write_determinism_current_checkpoint(adapter, 0))
+		return KN_ERR_CALLBACK;
+	adapter.determinism_bootstrap_ready = true;
+	osd_printf_info(
+			"Kaileron: remote bootstrap imported bytes=%u state_hash=%016llx\n",
+			len,
+			(unsigned long long)state_hash);
+	return KN_OK;
+}
+
 static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackControl *control)
 {
 	auto *adapter = static_cast<kaileron_adapter::impl *>(user);
@@ -1545,6 +1592,8 @@ bool kaileron_adapter::initialize()
 	m_impl->player_id = player_id;
 	m_impl->player_count = player_count;
 	m_impl->spectator_id = spectator_id;
+	m_impl->remote_bootstrap_enabled =
+			server[0] != 0 && lobby_url[0] != 0;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->frame_runner.set_trace(m_impl->trace);
 	m_impl->state_store.set_trace(m_impl->trace);
@@ -1617,6 +1666,9 @@ bool kaileron_adapter::initialize()
 		callbacks.state_hash = kn_mame_state_hash;
 	callbacks.set_playback_control = kn_mame_set_playback_control;
 	callbacks.on_lifecycle_event = kn_mame_on_lifecycle_event;
+	callbacks.serialized_state_size = kn_mame_serialized_state_size;
+	callbacks.export_serialized_state = kn_mame_export_serialized_state;
+	callbacks.import_serialized_state = kn_mame_import_serialized_state;
 
 	KnConfig config = {};
 	if (m_impl->kn_config_init(&config) != KN_OK)
@@ -1711,7 +1763,7 @@ bool kaileron_adapter::tick()
 	}
 	else
 	{
-		if (!m_impl->determinism_dir.empty())
+		if (!m_impl->determinism_dir.empty() && !m_impl->spectator)
 		{
 			KnMetrics metrics = {};
 			if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)

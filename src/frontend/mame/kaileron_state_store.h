@@ -23,6 +23,8 @@ public:
 	bool save_presentation();
 	bool restore_presentation();
 	bool verify_presentation_restore();
+	bool export_current(std::vector<u8> &bytes, u64 &state_hash);
+	bool import_current(u8 const *bytes, size_t size, u64 &state_hash);
 	bool export_current(std::string const &path, u64 &state_hash);
 	bool import_current(std::string const &path, u64 &state_hash);
 	bool write_current_manifest(std::string const &path, u32 frame);

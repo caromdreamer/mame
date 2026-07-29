@@ -394,16 +394,38 @@ bool kaileron_state_store::verify_presentation_restore()
 	return differences == 0;
 }
 
-bool kaileron_state_store::export_current(std::string const &path, u64 &state_hash)
+bool kaileron_state_store::export_current(std::vector<u8> &bytes, u64 &state_hash)
 {
-	std::vector<u8> bytes;
 	if (!save_machine_state(bytes))
 		return false;
 
 	state_hash = stable_state_hash(bytes);
-	if (!state_hash)
+	return state_hash != 0;
+}
+
+bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &state_hash)
+{
+	if (!bytes || m_machine.scheduled_event_pending() || !ensure_snapshot_size())
 		return false;
-	return write_binary_file(path, bytes);
+	if (size != m_snapshot_size)
+		return false;
+
+	if (m_machine.save().read_buffer_with_signature(
+			bytes, size, m_snapshot_signature) != STATERR_NONE)
+		return false;
+
+	for (snapshot_slot &slot : m_snapshots)
+		slot.valid = false;
+	m_presentation_snapshot.clear();
+	m_presentation_snapshot_hash = 0;
+	state_hash = current_state_hash();
+	return state_hash != 0;
+}
+
+bool kaileron_state_store::export_current(std::string const &path, u64 &state_hash)
+{
+	std::vector<u8> bytes;
+	return export_current(bytes, state_hash) && write_binary_file(path, bytes);
 }
 
 bool kaileron_state_store::import_current(std::string const &path, u64 &state_hash)
@@ -417,19 +439,7 @@ bool kaileron_state_store::import_current(std::string const &path, u64 &state_ha
 	input.seekg(0);
 	std::vector<u8> bytes(m_snapshot_size);
 	input.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size()));
-	if (!input)
-		return false;
-
-	if (m_machine.save().read_buffer_with_signature(
-			bytes.data(), bytes.size(), m_snapshot_signature) != STATERR_NONE)
-		return false;
-
-	for (snapshot_slot &slot : m_snapshots)
-		slot.valid = false;
-	m_presentation_snapshot.clear();
-	m_presentation_snapshot_hash = 0;
-	state_hash = current_state_hash();
-	return state_hash != 0;
+	return input && import_current(bytes.data(), bytes.size(), state_hash);
 }
 
 bool kaileron_state_store::write_current_manifest(std::string const &path, u32 frame)
