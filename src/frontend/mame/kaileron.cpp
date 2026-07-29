@@ -1410,6 +1410,8 @@ bool kaileron_adapter::initialize()
 	const char *server = env_value("KN_SERVER", "");
 	m_impl->networked = server[0] != 0;
 	const char *session = env_value("KN_SESSION", "mame-bublbobl");
+	const char *participant_id = env_value("KN_PARTICIPANT_ID", "");
+	const char *participant_token = env_value("KN_PARTICIPANT_TOKEN", "");
 	u32 default_players = server[0] ? 2 : 1;
 	u32 player_id = env_u32("KN_PLAYER_ID", 0);
 	u32 player_count = env_u32("KN_PLAYERS", default_players);
@@ -1478,6 +1480,8 @@ bool kaileron_adapter::initialize()
 	}
 	config.server_addr = server;
 	config.session_name = session;
+	config.participant_id = participant_id;
+	config.participant_token = participant_token;
 	config.player_id = player_id;
 	config.spectator = m_impl->spectator ? 1 : 0;
 	config.spectator_id = spectator_id;

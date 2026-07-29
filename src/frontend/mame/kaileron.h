@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define KN_API_VERSION 7
+#define KN_API_VERSION 8
 #define KN_MAX_PLAYERS 4
 
 typedef struct KnClient KnClient;
@@ -206,6 +206,8 @@ typedef struct KnConfig {
   uint32_t api_version;
   const char *server_addr;
   const char *session_name;
+  const char *participant_id;
+  const char *participant_token;
   uint32_t player_id;
   uint32_t spectator;
   uint64_t spectator_id;
