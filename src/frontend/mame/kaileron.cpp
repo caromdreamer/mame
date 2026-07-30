@@ -400,6 +400,8 @@ enum class determinism_bootstrap_result
 };
 
 constexpr std::array<u32, 3> DETERMINISM_CHECKPOINT_FRAMES = {60, 300, 1200};
+// Avoid serializing MAME before device startup and postload paths are safe.
+constexpr u32 REMOTE_BOOTSTRAP_WARMUP_FRAMES = 60;
 
 static std::string determinism_path(
 		kaileron_adapter::impl const &adapter,
@@ -1725,6 +1727,10 @@ bool kaileron_adapter::tick()
 	if (!m_impl->initialized || !m_impl->session)
 		return false;
 	if (m_impl->machine.scheduled_event_pending())
+		return false;
+	if (m_impl->remote_bootstrap_enabled &&
+			!m_impl->determinism_bootstrap_ready &&
+			m_impl->frame_runner.completed_frame_count() < REMOTE_BOOTSTRAP_WARMUP_FRAMES)
 		return false;
 
 	switch (prepare_determinism_bootstrap(*m_impl))
