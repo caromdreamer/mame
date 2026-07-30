@@ -902,28 +902,6 @@ static bool mapped_input_pressed(const KnInput *players, u32 player_count, mappe
 	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
 }
 
-static std::vector<KnInput> cleaned_player_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count, std::vector<std::vector<u8>> &storage)
-{
-	std::vector<KnInput> cleaned;
-	if (!players || player_count == 0)
-		return cleaned;
-
-	cleaned.reserve(player_count);
-	storage.reserve(player_count);
-	for (u32 player = 0; player < player_count; player++)
-	{
-		KnInput input = players[player];
-		if (input.bytes && input.len > 0)
-		{
-			storage.emplace_back(input.bytes, input.bytes + input.len);
-			apply_socd_cleaning(adapter, storage.back().data(), input.len);
-			input.bytes = storage.back().data();
-		}
-		cleaned.push_back(input);
-	}
-	return cleaned;
-}
-
 static void apply_mapped_inputs(
 		kaileron_adapter::impl &adapter,
 		const KnInput *players,
@@ -942,15 +920,11 @@ static void apply_mapped_inputs(
 		return;
 	}
 
-	std::vector<std::vector<u8>> cleaned_storage;
-	std::vector<KnInput> cleaned_inputs = cleaned_player_inputs(adapter, players, player_count, cleaned_storage);
-	const KnInput *canonical_players = cleaned_inputs.empty() ? players : cleaned_inputs.data();
-
 	for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
 	{
 		u8 input = 0;
-		if (canonical_players && canonical_players[player].bytes && canonical_players[player].len > 0)
-			input = canonical_players[player].bytes[0];
+		if (players && players[player].bytes && players[player].len > 0)
+			input = players[player].bytes[0];
 		if (count_stats && input)
 			adapter.nonneutral_input_count++;
 		if (count_stats && adapter.trace && player < 2 && input != adapter.last_applied_input[player])
@@ -965,7 +939,7 @@ static void apply_mapped_inputs(
 	{
 		for (mapped_input_field &mapped : adapter.input_map)
 		{
-			bool const pressed = mapped_input_pressed(canonical_players, player_count, mapped);
+			bool const pressed = mapped_input_pressed(players, player_count, mapped);
 			set_live_field(mapped.field, pressed);
 		}
 	}
