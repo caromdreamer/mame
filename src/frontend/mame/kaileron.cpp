@@ -377,6 +377,7 @@ struct kaileron_adapter::impl
 	u32 sdk_playback_speed_factor = 1000;
 	u32 sdk_render_interval = 1;
 	u32 sdk_pace_delay_us = 0;
+	u32 requested_runahead_frames = 0;
 	u32 runahead_frames = 0;
 	u32 presentation_sdk_frame = 0;
 	socd_mode local_socd_mode = socd_mode::up_priority;
@@ -1244,6 +1245,14 @@ static const char *lifecycle_event_name(u32 type)
 		return "observer_preparing";
 	case KN_LIFECYCLE_OBSERVER_READY:
 		return "observer_ready";
+	case KN_LIFECYCLE_SEAT_CLAIM_OFFERED:
+		return "seat_claim_offered";
+	case KN_LIFECYCLE_SEAT_ACTIVATED:
+		return "seat_activated";
+	case KN_LIFECYCLE_PEER_JOINED:
+		return "peer_joined";
+	case KN_LIFECYCLE_SEAT_CLAIM_CANCELLED:
+		return "seat_claim_cancelled";
 	case KN_LIFECYCLE_ROLLBACK_BEGIN:
 		return "rollback_begin";
 	case KN_LIFECYCLE_ROLLBACK_END:
@@ -1281,6 +1290,28 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		show_kaileron_status(adapter->machine, "Kaileron: connected");
 	else if (event->type == KN_LIFECYCLE_SESSION_STARTING)
 		show_kaileron_status(adapter->machine, "Kaileron: starting session");
+	else if (event->type == KN_LIFECYCLE_SEAT_CLAIM_OFFERED)
+		show_kaileron_status(adapter->machine, "Kaileron: preparing player " + std::to_string(event->peer_id + 1));
+	else if (event->type == KN_LIFECYCLE_SEAT_ACTIVATED)
+	{
+		KnPlaybackControl live = {};
+		live.target_speed_percent = 100;
+		live.render_interval = 1;
+		apply_playback_control(*adapter, live);
+		adapter->player_id = event->peer_id;
+		adapter->spectator = false;
+		adapter->runahead_frames = adapter->requested_runahead_frames;
+		adapter->determinism_role = "p" + std::to_string(adapter->player_id);
+		show_kaileron_status(adapter->machine, "Kaileron: joined as player " + std::to_string(adapter->player_id + 1));
+	}
+	else if (event->type == KN_LIFECYCLE_PEER_JOINED)
+		show_kaileron_status(adapter->machine, "Kaileron: player " + std::to_string(event->peer_id + 1) + " joined");
+	else if (event->type == KN_LIFECYCLE_SEAT_CLAIM_CANCELLED)
+	{
+		adapter->spectator = true;
+		adapter->runahead_frames = 0;
+		show_kaileron_status(adapter->machine, "Kaileron: player join cancelled");
+	}
 	else if (event->type == KN_LIFECYCLE_PEER_LEFT)
 		show_kaileron_status(adapter->machine, "Kaileron: peer left");
 	else if (event->type == KN_LIFECYCLE_ERROR &&
@@ -1602,6 +1633,7 @@ bool kaileron_adapter::initialize()
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
 	bool const replay_playback = env_enabled("KN_REPLAY_PLAYBACK");
 	u32 const requested_runahead = std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 8);
+	m_impl->requested_runahead_frames = requested_runahead;
 	m_impl->runahead_frames = (!m_impl->spectator && !replay_playback)
 			? requested_runahead
 			: 0;
