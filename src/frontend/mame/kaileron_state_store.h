@@ -28,6 +28,7 @@ public:
 	bool export_current(std::string const &path, u64 &state_hash);
 	bool import_current(std::string const &path, u64 &state_hash);
 	bool write_current_manifest(std::string const &path, u32 frame);
+	bool export_snapshot(u32 frame, std::vector<u8> &bytes, u64 &state_hash) const;
 	bool export_snapshot(u32 frame, std::string const &path, u64 &state_hash);
 	bool write_snapshot_manifest(u32 frame, std::string const &path);
 	u64 current_state_hash();

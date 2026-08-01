@@ -1169,6 +1169,25 @@ static KnResult KN_CALL kn_mame_export_serialized_state(void *user, u8 *bytes, u
 	return KN_OK;
 }
 
+static KnResult KN_CALL kn_mame_export_serialized_state_at(
+		void *user,
+		u32 frame,
+		u8 *bytes,
+		u32 len,
+		u64 *state_hash)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	std::vector<u8> snapshot;
+	u64 hash = 0;
+	if (!bytes || !state_hash ||
+			!adapter.state_store.export_snapshot(frame, snapshot, hash) ||
+			snapshot.size() != len)
+		return KN_ERR_CALLBACK;
+	std::memcpy(bytes, snapshot.data(), len);
+	*state_hash = hash;
+	return KN_OK;
+}
+
 static KnResult KN_CALL kn_mame_import_serialized_state(void *user, u8 const *bytes, u32 len)
 {
 	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
@@ -1176,6 +1195,8 @@ static KnResult KN_CALL kn_mame_import_serialized_state(void *user, u8 const *by
 	adapter.remote_bootstrap_buffer.clear();
 	if (!adapter.state_store.import_current(bytes, len, state_hash))
 		return KN_ERR_CALLBACK;
+	adapter.presentation_ready = false;
+	adapter.presentation_inputs.clear();
 	if (!adapter.determinism_dir.empty() &&
 			!write_determinism_current_checkpoint(adapter, 0))
 		return KN_ERR_CALLBACK;
@@ -1227,6 +1248,10 @@ static const char *lifecycle_event_name(u32 type)
 		return "peer_joined";
 	case KN_LIFECYCLE_SEAT_CLAIM_CANCELLED:
 		return "seat_claim_cancelled";
+	case KN_LIFECYCLE_SEAT_RELEASE_OFFERED:
+		return "seat_release_offered";
+	case KN_LIFECYCLE_SEAT_RELEASED:
+		return "seat_released";
 	case KN_LIFECYCLE_ROLLBACK_BEGIN:
 		return "rollback_begin";
 	case KN_LIFECYCLE_ROLLBACK_END:
@@ -1285,6 +1310,14 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		adapter->spectator = true;
 		adapter->runahead_frames = 0;
 		show_kaileron_status(adapter->machine, "Kaileron: player join cancelled");
+	}
+	else if (event->type == KN_LIFECYCLE_SEAT_RELEASED)
+	{
+		adapter->spectator = true;
+		adapter->runahead_frames = 0;
+		adapter->presentation_ready = false;
+		adapter->determinism_role = "observer";
+		show_kaileron_status(adapter->machine, "Kaileron: watching live game");
 	}
 	else if (event->type == KN_LIFECYCLE_PEER_LEFT)
 		show_kaileron_status(adapter->machine, "Kaileron: peer left");
@@ -1677,6 +1710,7 @@ bool kaileron_adapter::initialize()
 	callbacks.serialized_state_size = kn_mame_serialized_state_size;
 	callbacks.export_serialized_state = kn_mame_export_serialized_state;
 	callbacks.import_serialized_state = kn_mame_import_serialized_state;
+	callbacks.export_serialized_state_at = kn_mame_export_serialized_state_at;
 
 	KnConfig config = {};
 	if (m_impl->kn_config_init(&config) != KN_OK)

@@ -456,6 +456,19 @@ bool kaileron_state_store::write_current_manifest(std::string const &path, u32 f
 
 bool kaileron_state_store::export_snapshot(
 		u32 frame,
+		std::vector<u8> &bytes,
+		u64 &state_hash) const
+{
+	snapshot_slot const *slot = find_slot(frame);
+	if (!slot || slot->state_hash == 0)
+		return false;
+	bytes = slot->bytes;
+	state_hash = slot->state_hash;
+	return true;
+}
+
+bool kaileron_state_store::export_snapshot(
+		u32 frame,
 		std::string const &path,
 		u64 &state_hash)
 {

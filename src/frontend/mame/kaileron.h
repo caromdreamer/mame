@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define KN_API_VERSION 8
+#define KN_API_VERSION 9
 #define KN_MAX_PLAYERS 4
 
 typedef struct KnClient KnClient;
@@ -129,6 +129,8 @@ typedef enum KnLifecycleEventType {
   KN_LIFECYCLE_SEAT_ACTIVATED = 24,
   KN_LIFECYCLE_PEER_JOINED = 25,
   KN_LIFECYCLE_SEAT_CLAIM_CANCELLED = 26,
+  KN_LIFECYCLE_SEAT_RELEASE_OFFERED = 27,
+  KN_LIFECYCLE_SEAT_RELEASED = 28,
   KN_LIFECYCLE_ROLLBACK_BEGIN = 40,
   KN_LIFECYCLE_ROLLBACK_END = 41,
   KN_LIFECYCLE_ERROR = 60
@@ -200,9 +202,11 @@ typedef struct KnCallbacks {
                                     const KnLifecycleEvent *event);
 
   /*
-    Optional complete-state transfer hooks. When all three are provided for a
-    networked lobby session, the SDK elects the first authenticated active
-    player upload as the frame-zero checkpoint before anyone reports ready.
+    Optional complete-state transfer hooks. With the first three, a networked
+    lobby session elects the first authenticated active-player upload as the
+    frame-zero checkpoint before anyone reports ready.
+    export_serialized_state_at additionally supports non-mutating live
+    spectator checkpoints.
   */
   uint32_t(KN_CALL *serialized_state_size)(void *user);
   KnResult(KN_CALL *export_serialized_state)(void *user,
@@ -211,6 +215,16 @@ typedef struct KnCallbacks {
   KnResult(KN_CALL *import_serialized_state)(void *user,
                                              const uint8_t *bytes,
                                              uint32_t len);
+  /*
+    Optional non-mutating export of a rollback snapshot. This lets a live
+    spectator start near the current confirmed frame without rewinding the
+    active emulator.
+  */
+  KnResult(KN_CALL *export_serialized_state_at)(void *user,
+                                                uint32_t frame,
+                                                uint8_t *bytes,
+                                                uint32_t len,
+                                                uint64_t *state_hash);
 #if UINTPTR_MAX == UINT64_MAX
   uint32_t reserved[1];
 #else
