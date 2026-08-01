@@ -26,11 +26,14 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -334,11 +337,13 @@ struct kaileron_adapter::impl
 	kn_host_session_leave_fn kn_host_session_leave = nullptr;
 	u32 player_id = 0;
 	u32 player_count = 1;
+	u64 spectator_id = 0;
 	u32 input_size = 1;
 	u32 pace_sleep_count = 0;
 	u32 injected_frame_count = 0;
 	u32 nonneutral_input_count = 0;
 	u32 frame_duration_us = 0;
+	time_t fixed_rtc_base_time = 0;
 	u64 pace_sleep_time_us = 0;
 	u8 last_local_input = 0;
 	u8 last_applied_input[2] = {0xff, 0xff};
@@ -346,9 +351,12 @@ struct kaileron_adapter::impl
 	std::chrono::steady_clock::time_point last_chat_poll_at = {};
 	std::vector<mapped_input_field> input_map;
 	std::vector<std::vector<u8>> presentation_inputs;
+	std::vector<u8> remote_bootstrap_buffer;
 	std::string last_status_text;
 	std::string chat_inbox_path;
 	std::string chat_outbox_path;
+	std::string determinism_dir;
+	std::string determinism_role;
 	std::string chat_text;
 	std::deque<chat_overlay_message> chat_messages;
 	u64 last_chat_id = 0;
@@ -369,6 +377,7 @@ struct kaileron_adapter::impl
 	u32 sdk_playback_speed_factor = 1000;
 	u32 sdk_render_interval = 1;
 	u32 sdk_pace_delay_us = 0;
+	u32 requested_runahead_frames = 0;
 	u32 runahead_frames = 0;
 	u32 presentation_sdk_frame = 0;
 	socd_mode local_socd_mode = socd_mode::up_priority;
@@ -378,7 +387,117 @@ struct kaileron_adapter::impl
 	bool verify_presentation_restore = false;
 	bool show_playback_status = false;
 	bool show_rollback_stats = false;
+	bool fixed_rtc_enabled = false;
+	bool remote_bootstrap_enabled = false;
+	bool determinism_bootstrap_ready = false;
+	std::array<bool, 3> determinism_checkpoints_written = {false, false, false};
 };
+
+enum class determinism_bootstrap_result
+{
+	ready,
+	waiting,
+	failed
+};
+
+constexpr std::array<u32, 3> DETERMINISM_CHECKPOINT_FRAMES = {60, 300, 1200};
+// Avoid serializing MAME before device startup and postload paths are safe.
+constexpr u32 REMOTE_BOOTSTRAP_WARMUP_FRAMES = 60;
+
+static std::string determinism_path(
+		kaileron_adapter::impl const &adapter,
+		std::string const &filename)
+{
+	return (std::filesystem::path(adapter.determinism_dir) / filename).string();
+}
+
+static std::string determinism_checkpoint_stem(
+		kaileron_adapter::impl const &adapter,
+		u32 frame)
+{
+	return adapter.determinism_role + "-frame" +
+			[] (u32 value) {
+				std::ostringstream output;
+				output << std::setw(6) << std::setfill('0') << value;
+				return output.str();
+			}(frame);
+}
+
+static bool write_determinism_current_checkpoint(
+		kaileron_adapter::impl &adapter,
+		u32 frame)
+{
+	std::string const stem = determinism_checkpoint_stem(adapter, frame);
+	u64 state_hash = 0;
+	if (!adapter.state_store.export_current(
+			determinism_path(adapter, stem + ".bin"), state_hash))
+		return false;
+	if (!adapter.state_store.write_current_manifest(
+			determinism_path(adapter, stem + ".tsv"), frame))
+		return false;
+	osd_printf_info(
+			"Kaileron determinism: checkpoint role=%s frame=%u state_hash=%016llx\n",
+			adapter.determinism_role.c_str(),
+			frame,
+			(unsigned long long)state_hash);
+	return true;
+}
+
+static bool write_determinism_confirmed_checkpoint(
+		kaileron_adapter::impl &adapter,
+		u32 frame)
+{
+	std::string const stem = determinism_checkpoint_stem(adapter, frame);
+	u64 state_hash = 0;
+	if (!adapter.state_store.export_snapshot(
+			frame, determinism_path(adapter, stem + ".bin"), state_hash))
+		return false;
+	if (!adapter.state_store.write_snapshot_manifest(
+			frame, determinism_path(adapter, stem + ".tsv")))
+		return false;
+	osd_printf_info(
+			"Kaileron determinism: confirmed checkpoint role=%s frame=%u state_hash=%016llx\n",
+			adapter.determinism_role.c_str(),
+			frame,
+			(unsigned long long)state_hash);
+	return true;
+}
+
+static determinism_bootstrap_result prepare_determinism_bootstrap(
+		kaileron_adapter::impl &adapter)
+{
+	if (adapter.determinism_dir.empty() || adapter.determinism_bootstrap_ready)
+		return determinism_bootstrap_result::ready;
+	if (adapter.remote_bootstrap_enabled)
+		return determinism_bootstrap_result::ready;
+
+	std::string const bootstrap_path = determinism_path(adapter, "bootstrap.bin");
+	u64 state_hash = 0;
+	bool const authority = !adapter.spectator && adapter.player_id == 0;
+	if (authority)
+	{
+		if (!adapter.state_store.export_current(bootstrap_path, state_hash))
+			return determinism_bootstrap_result::failed;
+	}
+	else if (!std::filesystem::exists(bootstrap_path))
+	{
+		return determinism_bootstrap_result::waiting;
+	}
+	// Every participant, including the authority that wrote the checkpoint,
+	// must traverse MAME's postload callbacks before frame zero.
+	if (!adapter.state_store.import_current(bootstrap_path, state_hash))
+		return determinism_bootstrap_result::failed;
+	if (!write_determinism_current_checkpoint(adapter, 0))
+		return determinism_bootstrap_result::failed;
+
+	adapter.determinism_bootstrap_ready = true;
+	osd_printf_info(
+			"Kaileron determinism: bootstrap role=%s source=%s state_hash=%016llx\n",
+			adapter.determinism_role.c_str(),
+			authority ? "authority_reload" : "import",
+			(unsigned long long)state_hash);
+	return determinism_bootstrap_result::ready;
+}
 
 static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlaybackControl &control)
 {
@@ -415,6 +534,17 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 		adapter.sdk_render_interval = 1;
 	}
 	adapter.sdk_playback_override = enabled;
+}
+
+static void synchronize_fixed_rtc(kaileron_adapter::impl &adapter, u32 completed_frame)
+{
+	if (!adapter.fixed_rtc_enabled || adapter.frame_duration_us == 0)
+		return;
+
+	u64 const elapsed_seconds =
+			(u64(completed_frame) * adapter.frame_duration_us) / 1'000'000ULL;
+	adapter.machine.set_rtc_datetime(system_time(
+			adapter.fixed_rtc_base_time + time_t(elapsed_seconds)));
 }
 
 static void set_live_field(ioport_field *field, bool pressed)
@@ -772,28 +902,6 @@ static bool mapped_input_pressed(const KnInput *players, u32 player_count, mappe
 	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
 }
 
-static std::vector<KnInput> cleaned_player_inputs(kaileron_adapter::impl &adapter, const KnInput *players, u32 player_count, std::vector<std::vector<u8>> &storage)
-{
-	std::vector<KnInput> cleaned;
-	if (!players || player_count == 0)
-		return cleaned;
-
-	cleaned.reserve(player_count);
-	storage.reserve(player_count);
-	for (u32 player = 0; player < player_count; player++)
-	{
-		KnInput input = players[player];
-		if (input.bytes && input.len > 0)
-		{
-			storage.emplace_back(input.bytes, input.bytes + input.len);
-			apply_socd_cleaning(adapter, storage.back().data(), input.len);
-			input.bytes = storage.back().data();
-		}
-		cleaned.push_back(input);
-	}
-	return cleaned;
-}
-
 static void apply_mapped_inputs(
 		kaileron_adapter::impl &adapter,
 		const KnInput *players,
@@ -812,15 +920,11 @@ static void apply_mapped_inputs(
 		return;
 	}
 
-	std::vector<std::vector<u8>> cleaned_storage;
-	std::vector<KnInput> cleaned_inputs = cleaned_player_inputs(adapter, players, player_count, cleaned_storage);
-	const KnInput *canonical_players = cleaned_inputs.empty() ? players : cleaned_inputs.data();
-
 	for (u32 player = 0; player < std::min<u32>(player_count, 2); player++)
 	{
 		u8 input = 0;
-		if (canonical_players && canonical_players[player].bytes && canonical_players[player].len > 0)
-			input = canonical_players[player].bytes[0];
+		if (players && players[player].bytes && players[player].len > 0)
+			input = players[player].bytes[0];
 		if (count_stats && input)
 			adapter.nonneutral_input_count++;
 		if (count_stats && adapter.trace && player < 2 && input != adapter.last_applied_input[player])
@@ -835,7 +939,7 @@ static void apply_mapped_inputs(
 	{
 		for (mapped_input_field &mapped : adapter.input_map)
 		{
-			bool const pressed = mapped_input_pressed(canonical_players, player_count, mapped);
+			bool const pressed = mapped_input_pressed(players, player_count, mapped);
 			set_live_field(mapped.field, pressed);
 		}
 	}
@@ -1021,6 +1125,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 	}
 
 	adapter->in_advance = false;
+	synchronize_fixed_rtc(*adapter, frame + 1);
 	if (present_with_runahead)
 		adapter->presentation_ready = true;
 	if (adapter->trace && adapter->state_store.load_count() > 0)
@@ -1037,6 +1142,70 @@ static u64 KN_CALL kn_mame_state_hash(void *user)
 		return 0;
 
 	return adapter->state_store.current_state_hash();
+}
+
+static u32 KN_CALL kn_mame_serialized_state_size(void *user)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	u64 state_hash = 0;
+	adapter.remote_bootstrap_buffer.clear();
+	if (!adapter.state_store.export_current(adapter.remote_bootstrap_buffer, state_hash))
+		return 0;
+	if (adapter.remote_bootstrap_buffer.size() > std::numeric_limits<u32>::max())
+	{
+		adapter.remote_bootstrap_buffer.clear();
+		return 0;
+	}
+	return u32(adapter.remote_bootstrap_buffer.size());
+}
+
+static KnResult KN_CALL kn_mame_export_serialized_state(void *user, u8 *bytes, u32 len)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	if (!bytes || adapter.remote_bootstrap_buffer.size() != len)
+		return KN_ERR_INVALID_ARGUMENT;
+	std::memcpy(bytes, adapter.remote_bootstrap_buffer.data(), len);
+	adapter.remote_bootstrap_buffer.clear();
+	return KN_OK;
+}
+
+static KnResult KN_CALL kn_mame_export_serialized_state_at(
+		void *user,
+		u32 frame,
+		u8 *bytes,
+		u32 len,
+		u64 *state_hash)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	std::vector<u8> snapshot;
+	u64 hash = 0;
+	if (!bytes || !state_hash ||
+			!adapter.state_store.export_snapshot(frame, snapshot, hash) ||
+			snapshot.size() != len)
+		return KN_ERR_CALLBACK;
+	std::memcpy(bytes, snapshot.data(), len);
+	*state_hash = hash;
+	return KN_OK;
+}
+
+static KnResult KN_CALL kn_mame_import_serialized_state(void *user, u8 const *bytes, u32 len)
+{
+	auto &adapter = *static_cast<kaileron_adapter::impl *>(user);
+	u64 state_hash = 0;
+	adapter.remote_bootstrap_buffer.clear();
+	if (!adapter.state_store.import_current(bytes, len, state_hash))
+		return KN_ERR_CALLBACK;
+	adapter.presentation_ready = false;
+	adapter.presentation_inputs.clear();
+	if (!adapter.determinism_dir.empty() &&
+			!write_determinism_current_checkpoint(adapter, 0))
+		return KN_ERR_CALLBACK;
+	adapter.determinism_bootstrap_ready = true;
+	osd_printf_info(
+			"Kaileron: remote bootstrap imported bytes=%u state_hash=%016llx\n",
+			len,
+			(unsigned long long)state_hash);
+	return KN_OK;
 }
 
 static void KN_CALL kn_mame_set_playback_control(void *user, const KnPlaybackControl *control)
@@ -1067,6 +1236,22 @@ static const char *lifecycle_event_name(u32 type)
 		return "session_left";
 	case KN_LIFECYCLE_PEER_LEFT:
 		return "peer_left";
+	case KN_LIFECYCLE_OBSERVER_PREPARING:
+		return "observer_preparing";
+	case KN_LIFECYCLE_OBSERVER_READY:
+		return "observer_ready";
+	case KN_LIFECYCLE_SEAT_CLAIM_OFFERED:
+		return "seat_claim_offered";
+	case KN_LIFECYCLE_SEAT_ACTIVATED:
+		return "seat_activated";
+	case KN_LIFECYCLE_PEER_JOINED:
+		return "peer_joined";
+	case KN_LIFECYCLE_SEAT_CLAIM_CANCELLED:
+		return "seat_claim_cancelled";
+	case KN_LIFECYCLE_SEAT_RELEASE_OFFERED:
+		return "seat_release_offered";
+	case KN_LIFECYCLE_SEAT_RELEASED:
+		return "seat_released";
 	case KN_LIFECYCLE_ROLLBACK_BEGIN:
 		return "rollback_begin";
 	case KN_LIFECYCLE_ROLLBACK_END:
@@ -1104,6 +1289,36 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		show_kaileron_status(adapter->machine, "Kaileron: connected");
 	else if (event->type == KN_LIFECYCLE_SESSION_STARTING)
 		show_kaileron_status(adapter->machine, "Kaileron: starting session");
+	else if (event->type == KN_LIFECYCLE_SEAT_CLAIM_OFFERED)
+		show_kaileron_status(adapter->machine, "Kaileron: preparing player " + std::to_string(event->peer_id + 1));
+	else if (event->type == KN_LIFECYCLE_SEAT_ACTIVATED)
+	{
+		KnPlaybackControl live = {};
+		live.target_speed_percent = 100;
+		live.render_interval = 1;
+		apply_playback_control(*adapter, live);
+		adapter->player_id = event->peer_id;
+		adapter->spectator = false;
+		adapter->runahead_frames = adapter->requested_runahead_frames;
+		adapter->determinism_role = "p" + std::to_string(adapter->player_id);
+		show_kaileron_status(adapter->machine, "Kaileron: joined as player " + std::to_string(adapter->player_id + 1));
+	}
+	else if (event->type == KN_LIFECYCLE_PEER_JOINED)
+		show_kaileron_status(adapter->machine, "Kaileron: player " + std::to_string(event->peer_id + 1) + " joined");
+	else if (event->type == KN_LIFECYCLE_SEAT_CLAIM_CANCELLED)
+	{
+		adapter->spectator = true;
+		adapter->runahead_frames = 0;
+		show_kaileron_status(adapter->machine, "Kaileron: player join cancelled");
+	}
+	else if (event->type == KN_LIFECYCLE_SEAT_RELEASED)
+	{
+		adapter->spectator = true;
+		adapter->runahead_frames = 0;
+		adapter->presentation_ready = false;
+		adapter->determinism_role = "observer";
+		show_kaileron_status(adapter->machine, "Kaileron: watching live game");
+	}
 	else if (event->type == KN_LIFECYCLE_PEER_LEFT)
 		show_kaileron_status(adapter->machine, "Kaileron: peer left");
 	else if (event->type == KN_LIFECYCLE_ERROR &&
@@ -1406,6 +1621,8 @@ bool kaileron_adapter::initialize()
 	const char *server = env_value("KN_SERVER", "");
 	m_impl->networked = server[0] != 0;
 	const char *session = env_value("KN_SESSION", "mame-bublbobl");
+	const char *participant_id = env_value("KN_PARTICIPANT_ID", "");
+	const char *participant_token = env_value("KN_PARTICIPANT_TOKEN", "");
 	u32 default_players = server[0] ? 2 : 1;
 	u32 player_id = env_u32("KN_PLAYER_ID", 0);
 	u32 player_count = env_u32("KN_PLAYERS", default_players);
@@ -1414,12 +1631,16 @@ bool kaileron_adapter::initialize()
 
 	m_impl->player_id = player_id;
 	m_impl->player_count = player_count;
+	m_impl->spectator_id = spectator_id;
+	m_impl->remote_bootstrap_enabled =
+			server[0] != 0 && lobby_url[0] != 0;
 	m_impl->trace = env_enabled("KN_MAME_TRACE");
 	m_impl->frame_runner.set_trace(m_impl->trace);
 	m_impl->state_store.set_trace(m_impl->trace);
 	m_impl->spectator = env_enabled("KN_SPECTATOR");
 	bool const replay_playback = env_enabled("KN_REPLAY_PLAYBACK");
 	u32 const requested_runahead = std::min<u32>(env_u32("KN_MAME_RUNAHEAD", 0), 8);
+	m_impl->requested_runahead_frames = requested_runahead;
 	m_impl->runahead_frames = (!m_impl->spectator && !replay_playback)
 			? requested_runahead
 			: 0;
@@ -1428,7 +1649,18 @@ bool kaileron_adapter::initialize()
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
 	m_impl->chat_inbox_path = env_value("KN_CHAT_INBOX", "");
 	m_impl->chat_outbox_path = env_value("KN_CHAT_OUTBOX", "");
+	m_impl->determinism_dir = env_value("KN_MAME_DETERMINISM_DIR", "");
+	m_impl->determinism_role = m_impl->spectator
+			? "s" + std::to_string(spectator_id)
+			: "p" + std::to_string(player_id);
 	m_impl->local_socd_mode = parse_socd_mode(env_value("KN_SOCD_MODE", "up_priority"));
+	if (!m_impl->determinism_dir.empty())
+	{
+		osd_printf_info(
+				"Kaileron determinism: enabled role=%s directory=%s\n",
+				m_impl->determinism_role.c_str(),
+				m_impl->determinism_dir.c_str());
+	}
 	if (m_impl->trace)
 	{
 		osd_printf_info("Kaileron trace: SOCD mode=%s\n", socd_mode_name(m_impl->local_socd_mode));
@@ -1447,6 +1679,17 @@ bool kaileron_adapter::initialize()
 	m_impl->frame_duration_us = override_frame_ms > 0
 			? override_frame_ms * 1000
 			: frame_duration_us(m_impl->machine);
+	if (char const *fixed_time = std::getenv("KN_MAME_FIXED_TIME");
+			fixed_time && fixed_time[0])
+	{
+		char *end = nullptr;
+		long long const parsed = std::strtoll(fixed_time, &end, 10);
+		if (end && end != fixed_time && !*end)
+		{
+			m_impl->fixed_rtc_enabled = true;
+			m_impl->fixed_rtc_base_time = time_t(parsed);
+		}
+	}
 
 	KnCallbacks callbacks = {};
 	if (m_impl->kn_callbacks_init(&callbacks, m_impl.get()) != KN_OK)
@@ -1464,6 +1707,10 @@ bool kaileron_adapter::initialize()
 		callbacks.state_hash = kn_mame_state_hash;
 	callbacks.set_playback_control = kn_mame_set_playback_control;
 	callbacks.on_lifecycle_event = kn_mame_on_lifecycle_event;
+	callbacks.serialized_state_size = kn_mame_serialized_state_size;
+	callbacks.export_serialized_state = kn_mame_export_serialized_state;
+	callbacks.import_serialized_state = kn_mame_import_serialized_state;
+	callbacks.export_serialized_state_at = kn_mame_export_serialized_state_at;
 
 	KnConfig config = {};
 	if (m_impl->kn_config_init(&config) != KN_OK)
@@ -1474,6 +1721,8 @@ bool kaileron_adapter::initialize()
 	}
 	config.server_addr = server;
 	config.session_name = session;
+	config.participant_id = participant_id;
+	config.participant_token = participant_token;
 	config.player_id = player_id;
 	config.spectator = m_impl->spectator ? 1 : 0;
 	config.spectator_id = spectator_id;
@@ -1519,6 +1768,25 @@ bool kaileron_adapter::tick()
 		return false;
 	if (m_impl->machine.scheduled_event_pending())
 		return false;
+	if (m_impl->remote_bootstrap_enabled &&
+			!m_impl->determinism_bootstrap_ready &&
+			m_impl->frame_runner.completed_frame_count() < REMOTE_BOOTSTRAP_WARMUP_FRAMES)
+		return false;
+
+	switch (prepare_determinism_bootstrap(*m_impl))
+	{
+	case determinism_bootstrap_result::waiting:
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		return true;
+	case determinism_bootstrap_result::failed:
+		osd_printf_error(
+				"Kaileron determinism: bootstrap failed role=%s\n",
+				m_impl->determinism_role.c_str());
+		m_impl->machine.schedule_exit();
+		return true;
+	case determinism_bootstrap_result::ready:
+		break;
+	}
 
 	poll_chat_inbox(*m_impl);
 	refresh_chat_overlay(*m_impl);
@@ -1541,6 +1809,48 @@ bool kaileron_adapter::tick()
 	}
 	else
 	{
+		if (!m_impl->determinism_dir.empty() && !m_impl->spectator)
+		{
+			KnMetrics metrics = {};
+			if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)
+			{
+				osd_printf_error(
+						"Kaileron determinism: metrics failed role=%s\n",
+						m_impl->determinism_role.c_str());
+				m_impl->machine.schedule_exit();
+				return true;
+			}
+			for (size_t index = 0; index < DETERMINISM_CHECKPOINT_FRAMES.size(); index++)
+			{
+				u32 const checkpoint_frame = DETERMINISM_CHECKPOINT_FRAMES[index];
+				if (!m_impl->determinism_checkpoints_written[index] &&
+						metrics.confirmed_frame_count > checkpoint_frame)
+				{
+					if (!write_determinism_confirmed_checkpoint(
+							*m_impl, checkpoint_frame))
+					{
+						osd_printf_error(
+								"Kaileron determinism: checkpoint failed role=%s frame=%u\n",
+								m_impl->determinism_role.c_str(),
+								checkpoint_frame);
+						m_impl->machine.schedule_exit();
+						return true;
+					}
+					m_impl->determinism_checkpoints_written[index] = true;
+				}
+			}
+			if (m_impl->determinism_checkpoints_written.back())
+			{
+				osd_printf_info(
+						"Kaileron determinism: completed role=%s frame=%u rollbacks=%u\n",
+						m_impl->determinism_role.c_str(),
+						metrics.current_frame,
+						metrics.rollback_count);
+				m_impl->machine.schedule_exit();
+				return true;
+			}
+		}
+
 		if (!run_presentation_runahead(*m_impl))
 		{
 			osd_printf_error(

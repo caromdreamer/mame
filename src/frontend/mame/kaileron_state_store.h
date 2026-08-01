@@ -7,6 +7,7 @@
 
 #include "emu.h"
 
+#include <string>
 #include <vector>
 
 class kaileron_state_store
@@ -22,6 +23,14 @@ public:
 	bool save_presentation();
 	bool restore_presentation();
 	bool verify_presentation_restore();
+	bool export_current(std::vector<u8> &bytes, u64 &state_hash);
+	bool import_current(u8 const *bytes, size_t size, u64 &state_hash);
+	bool export_current(std::string const &path, u64 &state_hash);
+	bool import_current(std::string const &path, u64 &state_hash);
+	bool write_current_manifest(std::string const &path, u32 frame);
+	bool export_snapshot(u32 frame, std::vector<u8> &bytes, u64 &state_hash) const;
+	bool export_snapshot(u32 frame, std::string const &path, u64 &state_hash);
+	bool write_snapshot_manifest(u32 frame, std::string const &path);
 	u64 current_state_hash();
 	u64 snapshot_hash(u32 frame) const noexcept;
 	u64 presentation_snapshot_hash() const noexcept { return m_presentation_snapshot_hash; }
@@ -53,6 +62,10 @@ private:
 	bool load_machine_state(std::vector<u8> const &bytes);
 	snapshot_slot *find_slot(u32 frame) noexcept;
 	snapshot_slot const *find_slot(u32 frame) const noexcept;
+	bool write_manifest(
+			std::string const &path,
+			u32 frame,
+			std::vector<u8> const &bytes);
 	u64 stable_state_hash(std::vector<u8> const &bytes) const;
 
 	running_machine &m_machine;
