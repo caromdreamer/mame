@@ -103,7 +103,7 @@ protected:
 class menu_save_state : public menu_load_save_state_base
 {
 public:
-	menu_save_state(mame_ui_manager &mui, render_target &target, bool one_shot);
+	menu_save_state(mame_ui_manager &mui, render_target &target, bool one_shot, bool pause_while_active = true);
 
 protected:
 	virtual void process_file(std::string &&file_name) override;

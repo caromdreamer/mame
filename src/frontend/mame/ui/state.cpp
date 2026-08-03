@@ -574,9 +574,10 @@ void menu_load_state::process_file(std::string &&file_name)
 //  ctor
 //-------------------------------------------------
 
-menu_save_state::menu_save_state(mame_ui_manager &mui, render_target &target, bool one_shot)
+menu_save_state::menu_save_state(mame_ui_manager &mui, render_target &target, bool one_shot, bool pause_while_active)
 	: menu_load_save_state_base(mui, target, _("menu-savestate", "Save State"), _("menu-savestate", "Press a key or joystick button, or select state to overwrite"), false, one_shot)
 {
+	set_autopause(pause_while_active);
 }
 
 

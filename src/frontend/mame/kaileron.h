@@ -232,6 +232,12 @@ typedef struct KnCallbacks {
 #endif
 } KnCallbacks;
 
+enum {
+  KN_BOOTSTRAP_MODE_LEGACY = 0,
+  KN_BOOTSTRAP_MODE_LOCAL_AUTHORITY = 1,
+  KN_BOOTSTRAP_MODE_LOCAL_MATCH = 2
+};
+
 typedef struct KnConfig {
   /*
     Set to sizeof(KnConfig). Keep this first so future SDKs can validate the

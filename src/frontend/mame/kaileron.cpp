@@ -1,6 +1,7 @@
 // license:BSD-3-Clause
 
 #include "emu.h"
+#include "emuopts.h"
 #include "main.h"
 #include "kaileron_adapter.h"
 #include "kaileron_frame_runner.h"
@@ -1323,7 +1324,10 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		show_kaileron_status(adapter->machine, "Kaileron: peer left");
 	else if (event->type == KN_LIFECYCLE_ERROR &&
 			event->reason == KN_LIFECYCLE_ERROR_SERVER_TIMEOUT)
-		show_kaileron_status(adapter->machine, "Kaileron: server disconnected");
+	{
+		osd_printf_error("Kaileron: UDP timeout: no server packets received for 3 seconds\n");
+		show_kaileron_status(adapter->machine, "Kaileron: connection lost (no UDP response for 3 seconds)");
+	}
 	else if (event->type == KN_LIFECYCLE_SESSION_LEFT)
 	{
 		g_kn_mame_status_overlay.clear();
@@ -1732,6 +1736,11 @@ bool kaileron_adapter::initialize()
 	config.input_delay_frames = env_u32("KN_INPUT_DELAY", 0);
 	config.max_rollback_frames = env_u32("KN_MAX_ROLLBACK", 120);
 	config.frame_duration_us = m_impl->frame_duration_us;
+	char const *bootstrap_mode = m_impl->machine.options().kaileron_bootstrap_mode();
+	if (!std::strcmp(bootstrap_mode, "local_authority"))
+		config.reserved[0] = KN_BOOTSTRAP_MODE_LOCAL_AUTHORITY;
+	else if (!std::strcmp(bootstrap_mode, "local_match"))
+		config.reserved[0] = KN_BOOTSTRAP_MODE_LOCAL_MATCH;
 	config.net_profile.delay_ms = env_u32("KN_DELAY_MS", 0);
 	config.net_profile.jitter_ms = env_u32("KN_JITTER_MS", 0);
 	config.net_profile.loss_percent = env_u32("KN_LOSS_PERCENT", 0);

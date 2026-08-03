@@ -188,6 +188,7 @@ public:
 	void schedule_soft_reset();
 	void schedule_save(std::string &&filename);
 	void schedule_load(std::string &&filename);
+	void schedule_load_silent(std::string &&filename);
 
 	// date & time
 	void base_datetime(system_time &systime);
@@ -311,6 +312,9 @@ private:
 	attotime                m_saveload_schedule_time;
 	std::string             m_saveload_pending_file;
 	const char *            m_saveload_searchpath;
+	bool                    m_saveload_show_success_message;
+
+	void schedule_load_internal(std::string &&filename, bool show_success_message);
 
 	// notifier callbacks
 	struct notifier_callback_item

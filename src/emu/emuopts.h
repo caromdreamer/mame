@@ -68,6 +68,7 @@
 #define OPTION_SNAPBILINEAR         "snapbilinear"
 #define OPTION_STATENAME            "statename"
 #define OPTION_BURNIN               "burnin"
+#define OPTION_KAILERON_BOOTSTRAP_MODE "kaileron_bootstrap_mode"
 
 // core performance options
 #define OPTION_AUTOFRAMESKIP        "autoframeskip"
@@ -353,6 +354,7 @@ public:
 	bool snap_bilinear() const { return bool_value(OPTION_SNAPBILINEAR); }
 	const char *state_name() const { return value(OPTION_STATENAME); }
 	bool burnin() const { return bool_value(OPTION_BURNIN); }
+	const char *kaileron_bootstrap_mode() const { return value(OPTION_KAILERON_BOOTSTRAP_MODE); }
 
 	// core performance options
 	bool auto_frameskip() const { return bool_value(OPTION_AUTOFRAMESKIP); }

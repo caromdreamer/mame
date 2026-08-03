@@ -77,6 +77,7 @@ running_machine::running_machine(const machine_config &_config, machine_manager 
 	, m_saveload_schedule(saveload_schedule::NONE)
 	, m_saveload_schedule_time(attotime::zero)
 	, m_saveload_searchpath(nullptr)
+	, m_saveload_show_success_message(true)
 
 	, m_save(*this)
 	, m_memory(*this)
@@ -251,7 +252,10 @@ void running_machine::start()
 	if (savegame[0] != 0)
 	{
 		// if we're coming in with a savegame request, process it now
-		schedule_load(savegame);
+		if (std::getenv("KN_MAME"))
+			schedule_load_silent(savegame);
+		else
+			schedule_load(savegame);
 	}
 	else if (options().autosave())
 	{
@@ -618,6 +622,7 @@ void running_machine::schedule_save(std::string &&filename)
 	// note the start time and set a timer for the next timeslice to actually schedule it
 	m_saveload_schedule = saveload_schedule::SAVE;
 	m_saveload_schedule_time = this->time();
+	m_saveload_show_success_message = true;
 
 	// we can't be paused since we need to clear out anonymous timers
 	resume();
@@ -636,6 +641,7 @@ void running_machine::immediate_save(std::string_view filename)
 	// set up some parameters for handle_saveload()
 	m_saveload_schedule = saveload_schedule::SAVE;
 	m_saveload_schedule_time = this->time();
+	m_saveload_show_success_message = true;
 
 	// jump right into the save, anonymous timers can't hurt us!
 	handle_saveload();
@@ -649,12 +655,30 @@ void running_machine::immediate_save(std::string_view filename)
 
 void running_machine::schedule_load(std::string &&filename)
 {
+	schedule_load_internal(std::move(filename), true);
+}
+
+
+//-------------------------------------------------
+//  schedule_load_silent - schedule a load without
+//  displaying the success notification
+//-------------------------------------------------
+
+void running_machine::schedule_load_silent(std::string &&filename)
+{
+	schedule_load_internal(std::move(filename), false);
+}
+
+
+void running_machine::schedule_load_internal(std::string &&filename, bool show_success_message)
+{
 	// specify the filename to save or load
 	set_saveload_filename(std::move(filename));
 
 	// note the start time and set a timer for the next timeslice to actually schedule it
 	m_saveload_schedule = saveload_schedule::LOAD;
 	m_saveload_schedule_time = this->time();
+	m_saveload_show_success_message = show_success_message;
 
 	// we can't be paused since we need to clear out anonymous timers
 	resume();
@@ -673,6 +697,7 @@ void running_machine::immediate_load(std::string_view filename)
 	// set up some parameters for handle_saveload()
 	m_saveload_schedule = saveload_schedule::LOAD;
 	m_saveload_schedule_time = this->time();
+	m_saveload_show_success_message = true;
 
 	// jump right into the load, anonymous timers can't hurt us
 	handle_saveload();
@@ -941,11 +966,14 @@ void running_machine::handle_saveload()
 
 				case STATERR_NONE:
 				{
-					const char *const opnamed = (m_saveload_schedule == saveload_schedule::LOAD) ? "Loaded" : "Saved";
-					if (!m_save.supported())
-						popmessage("%s state %s %s.\nWarning: Save states are not officially supported for this system.", opnamed, preposname, m_saveload_pending_file);
-					else
-						popmessage("%s state %s %s.", opnamed, preposname, m_saveload_pending_file);
+					if (m_saveload_show_success_message)
+					{
+						const char *const opnamed = (m_saveload_schedule == saveload_schedule::LOAD) ? "Loaded" : "Saved";
+						if (!m_save.supported())
+							popmessage("%s state %s %s.\nWarning: Save states are not officially supported for this system.", opnamed, preposname, m_saveload_pending_file);
+						else
+							popmessage("%s state %s %s.", opnamed, preposname, m_saveload_pending_file);
+					}
 					break;
 				}
 
@@ -974,6 +1002,7 @@ void running_machine::handle_saveload()
 	m_saveload_pending_file.clear();
 	m_saveload_searchpath = nullptr;
 	m_saveload_schedule = saveload_schedule::NONE;
+	m_saveload_show_success_message = true;
 }
 
 

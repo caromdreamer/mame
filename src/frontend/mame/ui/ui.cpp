@@ -79,6 +79,8 @@ bool kaileron_netplay_ui_allowed(bool locked, ioport_type action)
 	{
 	case IPT_KAILERON_CHAT:
 	case IPT_UI_ON_SCREEN_DISPLAY:
+	case IPT_UI_SAVE_STATE:
+	case IPT_UI_SAVE_STATE_QUICK:
 	case IPT_UI_SNAPSHOT:
 	case IPT_UI_RECORD_MNG:
 	case IPT_UI_RECORD_AVI:
@@ -1873,7 +1875,7 @@ uint32_t mame_ui_manager::handler_ingame()
 	if (kaileron_netplay_ui_allowed(netplay_ui_locked, IPT_UI_SAVE_STATE) && machine().ui_input().pressed(IPT_UI_SAVE_STATE))
 	{
 		m_ui_target = &current_ui_target();
-		ui::menu::stack_push<ui::menu_save_state>(*this, *m_ui_target, true);
+		ui::menu::stack_push<ui::menu_save_state>(*this, *m_ui_target, true, !netplay_ui_locked);
 		activate_menu();
 		return 0;
 	}

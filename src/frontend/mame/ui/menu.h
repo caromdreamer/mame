@@ -594,9 +594,16 @@ class autopause_menu : public Base
 {
 protected:
 	using Base::Base;
+	void set_autopause(bool enabled) { m_autopause = enabled; }
 
 	virtual void menu_activated() override
 	{
+		if (!m_autopause)
+		{
+			Base::menu_activated();
+			return;
+		}
+
 		m_was_paused = this->machine().paused();
 		if (m_was_paused)
 			m_unpaused = false;
@@ -607,6 +614,12 @@ protected:
 
 	virtual void menu_deactivated() override
 	{
+		if (!m_autopause)
+		{
+			Base::menu_deactivated();
+			return;
+		}
+
 		m_unpaused = !this->machine().paused();
 		if (!m_was_paused && !m_unpaused)
 			this->machine().resume();
@@ -614,6 +627,7 @@ protected:
 	}
 
 private:
+	bool m_autopause = true;
 	bool m_was_paused = false;
 	bool m_unpaused = false;
 };
