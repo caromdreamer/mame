@@ -17,6 +17,7 @@ public:
 
 	void set_trace(bool trace) noexcept { m_trace = trace; }
 	void set_capacity(u32 capacity) noexcept;
+	void invalidate_current_snapshot() noexcept { m_current_snapshot_valid = false; }
 	bool save(u32 frame);
 	bool load(u32 frame, u32 completed_frame_count);
 	void discard_before(u32 frame);
@@ -39,12 +40,16 @@ public:
 	u32 load_count() const noexcept { return m_load_count; }
 	u32 presentation_save_count() const noexcept { return m_presentation_save_count; }
 	u32 presentation_restore_count() const noexcept { return m_presentation_restore_count; }
+	u32 presentation_reuse_count() const noexcept { return m_presentation_reuse_count; }
+	u32 presentation_fallback_save_count() const noexcept { return m_presentation_fallback_save_count; }
 	u32 discard_count() const noexcept { return m_discard_count; }
 	u32 last_snapshot_size() const noexcept { return m_last_snapshot_size; }
 	u32 valid_slot_count() const noexcept;
 	u32 slot_capacity() const noexcept { return u32(m_snapshots.size()); }
 	u64 average_save_us() const noexcept;
 	u64 average_load_us() const noexcept;
+	u64 average_presentation_save_us() const noexcept;
+	u64 average_presentation_restore_us() const noexcept;
 	u64 discard_time_us() const noexcept { return m_discard_time_us; }
 
 private:
@@ -78,12 +83,17 @@ private:
 	u32 m_load_count = 0;
 	u32 m_presentation_save_count = 0;
 	u32 m_presentation_restore_count = 0;
+	u32 m_presentation_reuse_count = 0;
+	u32 m_presentation_fallback_save_count = 0;
 	u32 m_discard_count = 0;
 	u32 m_last_snapshot_size = 0;
 	u64 m_save_time_us = 0;
 	u64 m_load_time_us = 0;
+	u64 m_presentation_save_time_us = 0;
+	u64 m_presentation_restore_time_us = 0;
 	u64 m_discard_time_us = 0;
 	u64 m_presentation_snapshot_hash = 0;
+	bool m_current_snapshot_valid = false;
 	bool m_trace = false;
 };
 

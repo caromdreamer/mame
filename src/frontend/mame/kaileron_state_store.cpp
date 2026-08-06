@@ -136,6 +136,7 @@ bool kaileron_state_store::ensure_snapshot_size()
 		m_snapshots.clear();
 		m_presentation_snapshot.clear();
 		m_presentation_snapshot_hash = 0;
+		m_current_snapshot_valid = false;
 	}
 	m_snapshot_size = size;
 	m_snapshot_signature = signature;
@@ -168,6 +169,7 @@ bool kaileron_state_store::load_machine_state(std::vector<u8> const &bytes)
 	if (bytes.empty() || m_machine.scheduled_event_pending() || !ensure_snapshot_size())
 		return false;
 
+	invalidate_current_snapshot();
 	return m_machine.save().read_buffer_with_signature(
 			bytes.data(), bytes.size(), m_snapshot_signature) == STATERR_NONE;
 }
@@ -302,12 +304,30 @@ void kaileron_state_store::discard_before(u32 frame)
 
 bool kaileron_state_store::save_presentation()
 {
+	auto const start = std::chrono::steady_clock::now();
 	scoped_presentation_state_io const state_io_scope;
-	if (!save_machine_state(m_presentation_snapshot))
+	if (!ensure_snapshot_size())
 		return false;
 
-	m_presentation_snapshot_hash = stable_state_hash(m_presentation_snapshot);
+	if (m_current_snapshot_valid &&
+			m_presentation_snapshot.size() == m_snapshot_size &&
+			m_presentation_snapshot_hash != 0)
+	{
+		m_presentation_reuse_count++;
+	}
+	else
+	{
+		if (!save_machine_state(m_presentation_snapshot))
+			return false;
+		m_presentation_snapshot_hash = stable_state_hash(m_presentation_snapshot);
+		m_presentation_fallback_save_count++;
+	}
+
+	// The snapshot is now the presentation restore point.  It no longer proves
+	// that the live machine still has the same state once speculation begins.
+	m_current_snapshot_valid = false;
 	m_presentation_save_count++;
+	m_presentation_save_time_us += elapsed_us(start);
 	return true;
 }
 
@@ -316,6 +336,8 @@ bool kaileron_state_store::restore_presentation()
 	if (m_presentation_snapshot.empty() || !ensure_snapshot_size())
 		return false;
 
+	auto const start = std::chrono::steady_clock::now();
+	invalidate_current_snapshot();
 	scoped_presentation_state_io const state_io_scope;
 	// Presentation may process a user-requested exit while drawing its visible
 	// frame.  Restore the authoritative machine state even when that external
@@ -327,6 +349,7 @@ bool kaileron_state_store::restore_presentation()
 		return false;
 
 	m_presentation_restore_count++;
+	m_presentation_restore_time_us += elapsed_us(start);
 	return true;
 }
 
@@ -410,6 +433,7 @@ bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &sta
 	if (size != m_snapshot_size)
 		return false;
 
+	invalidate_current_snapshot();
 	if (m_machine.save().read_buffer_with_signature(
 			bytes, size, m_snapshot_signature) != STATERR_NONE)
 		return false;
@@ -418,6 +442,7 @@ bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &sta
 		slot.valid = false;
 	m_presentation_snapshot.clear();
 	m_presentation_snapshot_hash = 0;
+	m_current_snapshot_valid = false;
 	state_hash = current_state_hash();
 	return state_hash != 0;
 }
@@ -572,13 +597,24 @@ bool kaileron_state_store::write_manifest(
 u64 kaileron_state_store::current_state_hash()
 {
 	if (!ensure_snapshot_size())
+	{
+		m_current_snapshot_valid = false;
 		return 0;
+	}
 
-	std::vector<u8> bytes(m_snapshot_size);
+	m_presentation_snapshot.resize(m_snapshot_size);
 	if (m_machine.save().write_buffer_with_signature(
-			bytes.data(), bytes.size(), m_snapshot_signature) != STATERR_NONE)
+			m_presentation_snapshot.data(),
+			m_presentation_snapshot.size(),
+			m_snapshot_signature) != STATERR_NONE)
+	{
+		m_current_snapshot_valid = false;
 		return 0;
-	return stable_state_hash(bytes);
+	}
+
+	m_presentation_snapshot_hash = stable_state_hash(m_presentation_snapshot);
+	m_current_snapshot_valid = m_presentation_snapshot_hash != 0;
+	return m_presentation_snapshot_hash;
 }
 
 u64 kaileron_state_store::snapshot_hash(u32 frame) const noexcept
@@ -604,4 +640,14 @@ u64 kaileron_state_store::average_save_us() const noexcept
 u64 kaileron_state_store::average_load_us() const noexcept
 {
 	return m_load_count ? m_load_time_us / m_load_count : 0;
+}
+
+u64 kaileron_state_store::average_presentation_save_us() const noexcept
+{
+	return m_presentation_save_count ? m_presentation_save_time_us / m_presentation_save_count : 0;
+}
+
+u64 kaileron_state_store::average_presentation_restore_us() const noexcept
+{
+	return m_presentation_restore_count ? m_presentation_restore_time_us / m_presentation_restore_count : 0;
 }

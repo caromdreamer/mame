@@ -1000,6 +1000,7 @@ static bool run_presentation_runahead(kaileron_adapter::impl &adapter)
 	for (u32 lookahead = 0; lookahead < adapter.runahead_frames; lookahead++)
 	{
 		bool const final_frame = lookahead + 1 == adapter.runahead_frames;
+		adapter.state_store.invalidate_current_snapshot();
 		apply_mapped_inputs(adapter, inputs.data(), u32(inputs.size()), false);
 		if (!adapter.frame_runner.advance(
 				adapter.presentation_sdk_frame,
@@ -1018,11 +1019,12 @@ static bool run_presentation_runahead(kaileron_adapter::impl &adapter)
 	{
 		if (!adapter.state_store.verify_presentation_restore())
 		{
+			u64 const expected_hash = adapter.state_store.presentation_snapshot_hash();
 			u64 const restored_hash = adapter.state_store.current_state_hash();
 			osd_printf_error(
 					"Kaileron: runahead restore mismatch frame=%u before=%016llx after=%016llx\n",
 					adapter.presentation_sdk_frame,
-					(unsigned long long)adapter.state_store.presentation_snapshot_hash(),
+					(unsigned long long)expected_hash,
 					(unsigned long long)restored_hash);
 			return false;
 		}
@@ -1116,6 +1118,7 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 
 	if (present_with_runahead)
 		cache_presentation_inputs(*adapter, frame, players, player_count);
+	adapter->state_store.invalidate_current_snapshot();
 	apply_mapped_inputs(*adapter, players, player_count, true);
 
 	adapter->in_advance = true;
@@ -1910,7 +1913,7 @@ void kaileron_adapter::on_exit()
 	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
-				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u stalls=%u pace_sleeps=%u pace_sleep_us=%llu frame_notifiers=%u rollback_replay_frames=%u spectator_catchup_frames=%u speculative_frames=%u runahead_frames=%u presentation_saves=%u presentation_restores=%u saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx confirmed_state_frame=%u confirmed_state_hash=%016llx missing=%u nacks=%u\n",
+				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u stalls=%u pace_sleeps=%u pace_sleep_us=%llu frame_notifiers=%u rollback_replay_frames=%u spectator_catchup_frames=%u speculative_frames=%u runahead_frames=%u presentation_saves=%u presentation_restores=%u presentation_reuses=%u presentation_fallback_saves=%u presentation_save_avg_us=%llu presentation_restore_avg_us=%llu saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx confirmed_state_frame=%u confirmed_state_hash=%016llx missing=%u nacks=%u\n",
 				metrics.current_frame,
 				m_impl->frame_runner.completed_frame_count(),
 				metrics.confirmed_frame_count,
@@ -1926,6 +1929,10 @@ void kaileron_adapter::on_exit()
 				m_impl->runahead_frames,
 				m_impl->state_store.presentation_save_count(),
 				m_impl->state_store.presentation_restore_count(),
+				m_impl->state_store.presentation_reuse_count(),
+				m_impl->state_store.presentation_fallback_save_count(),
+				(unsigned long long)m_impl->state_store.average_presentation_save_us(),
+				(unsigned long long)m_impl->state_store.average_presentation_restore_us(),
 				m_impl->state_store.save_count(),
 				m_impl->state_store.load_count(),
 				m_impl->frame_runner.advance_count(),
