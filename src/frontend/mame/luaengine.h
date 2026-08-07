@@ -54,6 +54,7 @@ public:
 	sol::environment make_environment();
 
 	bool frame_hook();
+	bool frame_presented_hook();
 
 	std::optional<long> menu_populate(const std::string &menu, std::vector<std::tuple<std::string, std::string, std::string> > &menu_list, std::string &flags);
 	std::pair<bool, std::optional<long> > menu_callback(const std::string &menu, int index, const std::string &event);

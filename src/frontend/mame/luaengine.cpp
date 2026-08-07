@@ -942,6 +942,7 @@ void lua_engine::initialize()
 		};
 	emu["register_prestart"] = [this] (sol::function func) { register_function(func, "LUA_ON_PRESTART"); };
 	emu["register_frame_done"] = [this] (sol::function func) { register_function(func, "LUA_ON_FRAME_DONE"); };
+	emu["register_frame_presented"] = [this] (sol::function func) { register_function(func, "LUA_ON_FRAME_PRESENTED"); };
 	emu["register_sound_update"] = [this] (sol::function func) { register_function(func, "LUA_ON_SOUND_UPDATE"); };
 	emu["register_periodic"] = [this] (sol::function func) { register_function(func, "LUA_ON_PERIODIC"); };
 	emu["register_mandatory_file_manager_override"] = [this] (sol::function func) { register_function(func, "LUA_ON_MANDATORY_FILE_MANAGER_OVERRIDE"); };
@@ -2328,6 +2329,11 @@ bool lua_engine::frame_hook()
 	resume_tasks(m_lua_state, tasks, true); // TODO: doesn't need to return anything
 
 	return execute_function("LUA_ON_FRAME_DONE");
+}
+
+bool lua_engine::frame_presented_hook()
+{
+	return execute_function("LUA_ON_FRAME_PRESENTED");
 }
 
 //-------------------------------------------------

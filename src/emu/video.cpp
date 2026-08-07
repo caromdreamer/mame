@@ -259,6 +259,11 @@ void video_manager::frame_update(bool from_debugger)
 	if (kaileron_frame_runs_plugin_hooks(frame_mode))
 		anything_changed = emulator_info::frame_hook() || anything_changed;
 
+	// Explicit presentation callbacks are render-only tools selected for a
+	// visible frame.  Unlike general plugin hooks, they also run on the final
+	// speculative frame used for Kaileron runahead presentation.
+	anything_changed = emulator_info::frame_presented_hook() || anything_changed;
+
 	// if none of the screens changed and we haven't skipped too many frames in a row,
 	// mark this frame as skipped to prevent throttling; this helps for games that
 	// don't update their screen at the monitor refresh rate

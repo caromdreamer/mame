@@ -105,6 +105,11 @@ emu.register_sound_update(callback)
     to true.  The callback gets one parameter which is a hash with device tag
     as key and a (channel-sized) vector of (buffer-sized) vector of samples
     in the -1..1 range.
+emu.register_frame_presented(callback)
+    Add a callback that runs while composing each visible video frame.  This is
+    intended for render-only overlays.  Kaileron also invokes it for the final
+    speculative presentation frame when runahead is enabled; general frame and
+    plugin callbacks remain suppressed for speculative frames.
 emu.print_error(message)
     Print an error message.
 emu.print_warning(message)

@@ -66,8 +66,11 @@ namespace {
 
 bool kaileron_netplay_ui_locked()
 {
-	char const *value = std::getenv("KN_MAME");
-	return value && value[0] && value[0] != '0';
+	// KN_MAME means the launcher owns the MAME process, including serverless
+	// solo sessions.  Only an actual rollback server requires deterministic UI
+	// restrictions.
+	char const *value = std::getenv("KN_SERVER");
+	return value && value[0];
 }
 
 bool kaileron_netplay_ui_allowed(bool locked, ioport_type action)
