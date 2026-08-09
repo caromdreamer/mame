@@ -2,6 +2,8 @@
 
 #include "emu.h"
 #include "emuopts.h"
+#include "debugger.h"
+#include "debug/debugcon.h"
 #include "main.h"
 #include "kaileron_adapter.h"
 #include "kaileron_frame_runner.h"
@@ -352,6 +354,8 @@ struct kaileron_adapter::impl
 	std::chrono::steady_clock::time_point last_chat_poll_at = {};
 	std::vector<mapped_input_field> input_map;
 	std::vector<std::vector<u8>> presentation_inputs;
+	std::array<std::vector<u8>, KN_MAX_PLAYERS> debug_input;
+	std::array<bool, KN_MAX_PLAYERS> debug_input_enabled = {};
 	std::vector<u8> remote_bootstrap_buffer;
 	std::string last_status_text;
 	std::string chat_inbox_path;
@@ -875,6 +879,14 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	build_input_map(adapter);
 
 	u32 const source_player = env_u32("KN_MAME_LOCAL_CONTROL_PLAYER", 0);
+	if (source_player < adapter.debug_input.size() &&
+			adapter.debug_input_enabled[source_player])
+	{
+		std::vector<u8> const &override = adapter.debug_input[source_player];
+		std::memcpy(bytes, override.data(), std::min<std::size_t>(len, override.size()));
+		apply_socd_cleaning(adapter, bytes, len);
+		return;
+	}
 	for (mapped_input_field &mapped : adapter.input_map)
 	{
 		if (mapped.owner_only && adapter.player_id != 0)
@@ -883,6 +895,100 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
 	apply_socd_cleaning(adapter, bytes, len);
+}
+
+static bool parse_hex_bytes(std::string_view text, std::vector<u8> &out)
+{
+	if (text.empty() || (text.size() % 2) || text.size() > KN_MAX_PLAYERS * 8)
+		return false;
+
+	auto nibble = [] (char ch) -> int {
+		if (ch >= '0' && ch <= '9')
+			return ch - '0';
+		if (ch >= 'a' && ch <= 'f')
+			return ch - 'a' + 10;
+		if (ch >= 'A' && ch <= 'F')
+			return ch - 'A' + 10;
+		return -1;
+	};
+
+	out.clear();
+	out.reserve(text.size() / 2);
+	for (std::size_t index = 0; index < text.size(); index += 2)
+	{
+		int const high = nibble(text[index]);
+		int const low = nibble(text[index + 1]);
+		if (high < 0 || low < 0)
+			return false;
+		out.push_back(u8((high << 4) | low));
+	}
+	return true;
+}
+
+static void register_debug_bridge_commands(kaileron_adapter::impl &adapter)
+{
+	if (!env_enabled("KN_MAME_DEBUG_BRIDGE") ||
+			!(adapter.machine.debug_flags & DEBUG_FLAG_ENABLED))
+		return;
+
+	debugger_console &console = adapter.machine.debugger().console();
+	console.register_command(
+			"kninput",
+			CMDFLAG_NONE,
+			2,
+			2,
+			[&adapter] (std::vector<std::string_view> const &params) {
+				char *end = nullptr;
+				std::string const player_text(params[0]);
+				unsigned long const player = std::strtoul(player_text.c_str(), &end, 10);
+				std::vector<u8> input;
+				if (!end || *end || player >= adapter.debug_input.size() ||
+						!parse_hex_bytes(params[1], input))
+				{
+					adapter.machine.debugger().console().printf(
+							"Usage: kninput <player>,<hex bytes>\n");
+					return;
+				}
+				adapter.debug_input[player] = std::move(input);
+				adapter.debug_input_enabled[player] = true;
+				adapter.machine.debugger().console().printf(
+						"Kaileron debug input set for player %u\n", u32(player));
+			});
+	console.register_command(
+			"kninputclear",
+			CMDFLAG_NONE,
+			0,
+			1,
+			[&adapter] (std::vector<std::string_view> const &params) {
+				if (params.empty())
+				{
+					adapter.debug_input_enabled.fill(false);
+					adapter.machine.debugger().console().printf("Kaileron debug inputs cleared\n");
+					return;
+				}
+				char *end = nullptr;
+				std::string const player_text(params[0]);
+				unsigned long const player = std::strtoul(player_text.c_str(), &end, 10);
+				if (!end || *end || player >= adapter.debug_input.size())
+				{
+					adapter.machine.debugger().console().printf(
+							"Usage: kninputclear [player]\n");
+					return;
+				}
+				adapter.debug_input_enabled[player] = false;
+				adapter.machine.debugger().console().printf(
+						"Kaileron debug input cleared for player %u\n", u32(player));
+			});
+	console.register_command(
+			"knframe",
+			CMDFLAG_NONE,
+			0,
+			0,
+			[&adapter] (std::vector<std::string_view> const &) {
+				adapter.machine.debugger().console().printf(
+						"Kaileron frame %u\n",
+						adapter.frame_runner.completed_frame_count());
+			});
 }
 
 static bool input_bit_pressed(KnInput const &input, mapped_input_field const &mapped)
@@ -1682,6 +1788,7 @@ bool kaileron_adapter::initialize()
 	m_impl->original_throttled = m_impl->machine.video().throttled();
 	u32 input_size = resolve_input_size(*m_impl);
 	m_impl->input_size = input_size;
+	register_debug_bridge_commands(*m_impl);
 	u32 const override_frame_ms = env_u32("KN_MAME_FRAME_MS", 0);
 	m_impl->frame_duration_us = override_frame_ms > 0
 			? override_frame_ms * 1000

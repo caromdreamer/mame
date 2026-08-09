@@ -1300,6 +1300,12 @@ debug_gdbstub::cmd_reply debug_gdbstub::handle_q(const char *buf)
 		text_buffer &textbuf = m_debugger_console->get_console_textbuf();
 		text_buffer_clear(textbuf);
 		m_debugger_console->execute_command(command, false);
+		// Monitor commands such as gvblank resume emulation without passing
+		// through the RSP continue handler.  Arrange for the normal stop packet
+		// when they return control to the debugger so automation clients can
+		// advance by frame without polling or racing the emulation thread.
+		if (!m_debugger_cpu->is_stopped())
+			m_send_stop_packet = true;
 		uint32_t nlines = text_buffer_num_lines(textbuf);
 		if ( nlines == 0 )
 			return REPLY_OK;
@@ -1533,6 +1539,10 @@ void debug_gdbstub::send_stop_packet()
 		offs_t offset = m_triggered_watchpoint->address();
 		uint64_t address = m_address_map[offset];
 		reply += string_format(":%" PRIx64 ";", address);
+	}
+	else if ( m_triggered_breakpoint != nullptr )
+	{
+		reply += "swbreak:;";
 	}
 	if ( m_target_xml_sent )
 		for ( const auto &gdb_regnum: m_stop_reply_registers )
