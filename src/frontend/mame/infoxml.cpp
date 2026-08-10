@@ -195,6 +195,16 @@ constexpr char f_dtd_string[] =
 		"\t\t\t<!ATTLIST rom merge CDATA #IMPLIED>\n"
 		"\t\t\t<!ATTLIST rom region CDATA #IMPLIED>\n"
 		"\t\t\t<!ATTLIST rom offset CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom load_group CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom load_skip CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom load_reverse (yes|no) \"no\">\n"
+		"\t\t\t<!ATTLIST rom load_bit_width CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom load_bit_shift CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom load_complex (yes|no) \"no\">\n"
+		"\t\t\t<!ATTLIST rom region_size CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom region_width CDATA #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom region_endian (little|big) #IMPLIED>\n"
+		"\t\t\t<!ATTLIST rom region_invert (yes|no) \"no\">\n"
 		"\t\t\t<!ATTLIST rom status (baddump|nodump|good) \"good\">\n"
 		"\t\t\t<!ATTLIST rom optional (yes|no) \"no\">\n"
 		"\t\t<!ELEMENT disk EMPTY>\n"
@@ -1187,6 +1197,28 @@ void output_rom(std::ostream &out, machine_config &config, driver_list const *dr
 			{
 				// for non-disk entries, print offset
 				util::stream_format(out, " offset=\"%x\"", ROM_GETOFFSET(rom));
+
+				// Kaileron ROM Workshop consumes the actual ROM loader geometry.
+				// Upstream listxml intentionally flattens these details, which makes
+				// ROM_LOAD16_BYTE and ROM_LOAD16_WORD_SWAP indistinguishable.
+				bool complex_load(false);
+				for (tiny_rom_entry const *next = rom + 1;
+						!ROMENTRY_ISFILE(next) && !ROMENTRY_ISREGIONEND(next);
+						++next)
+				{
+					if (ROMENTRY_ISCONTINUE(next) || ROMENTRY_ISRELOAD(next) || ROMENTRY_ISIGNORE(next))
+						complex_load = true;
+				}
+				util::stream_format(out, " load_group=\"%u\"", ROM_GETGROUPSIZE(rom));
+				util::stream_format(out, " load_skip=\"%u\"", ROM_GETSKIPCOUNT(rom));
+				util::stream_format(out, " load_reverse=\"%s\"", ROM_ISREVERSED(rom) ? "yes" : "no");
+				util::stream_format(out, " load_bit_width=\"%u\"", ROM_GETBITWIDTH(rom));
+				util::stream_format(out, " load_bit_shift=\"%u\"", ROM_GETBITSHIFT(rom));
+				util::stream_format(out, " load_complex=\"%s\"", complex_load ? "yes" : "no");
+				util::stream_format(out, " region_size=\"%u\"", ROMREGION_GETLENGTH(region));
+				util::stream_format(out, " region_width=\"%u\"", ROMREGION_GETWIDTH(region));
+				util::stream_format(out, " region_endian=\"%s\"", ROMREGION_ISBIGENDIAN(region) ? "big" : "little");
+				util::stream_format(out, " region_invert=\"%s\"", ROMREGION_ISINVERTED(region) ? "yes" : "no");
 			}
 			else
 			{
