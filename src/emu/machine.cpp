@@ -231,6 +231,13 @@ void running_machine::start()
 	m_sound->after_devices_init();
 	save().register_postload(save_prepost_delegate(FUNC(running_machine::postload_all_devices), this));
 
+	// Driver initialisation may decrypt, rearrange or otherwise prepare ROM
+	// regions.  Capture that final clean runtime image so launcher save states
+	// can carry later code, data and graphics edits without modifying the ROM
+	// archives on disk.
+	if (std::getenv("KN_MAME"))
+		save().register_memory_region_overlays();
+
 	// save outputs created before start time
 	output().register_save();
 

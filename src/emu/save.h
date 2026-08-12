@@ -170,6 +170,20 @@ public:
 	void register_presave(save_prepost_delegate func);
 	void register_postload(save_prepost_delegate func);
 
+	// Optional regions carried by disk save states and explicit bootstrap
+	// checkpoints, but deliberately excluded from ordinary RAM snapshots used
+	// by rewind, rollback and runahead.  The clean baseline is captured when a
+	// region is registered; serialized states contain only changed byte ranges.
+	void register_extended_state_region(std::string name, void *data, size_t size, bool portable_full = false);
+	void register_memory_region_overlays();
+	bool write_extended_state(std::vector<u8> &bytes) const;
+	bool read_extended_state(void const *bytes, size_t size);
+	size_t transient_state_size() const;
+	u32 transient_state_signature() const;
+	bool indexed_item_is_extended(int index) const;
+	save_error write_transient_buffer(void *buf, size_t size, u32 signature);
+	save_error read_transient_buffer(void const *buf, size_t size, u32 signature);
+
 	// callback dispatching
 	void dispatch_presave();
 	void dispatch_postload();
@@ -325,6 +339,15 @@ private:
 		save_prepost_delegate m_func;                 // delegate
 	};
 
+	struct extended_state_region
+	{
+		std::string m_name;
+		u8 *m_data;
+		std::vector<u8> m_baseline;
+		u32 m_baseline_crc;
+		bool m_portable_full;
+	};
+
 	// internal helpers
 	template <typename T, typename U, typename V, typename W>
 	save_error do_write(T check_space, U write_block, V start_header, W start_data);
@@ -334,6 +357,7 @@ private:
 	save_error do_write_known(size_t total_size, u32 signature, T check_space, U write_block, V start_header, W start_data);
 	template <typename T, typename U, typename V, typename W>
 	save_error do_read_known(size_t total_size, u32 signature, T check_length, U read_block, V start_header, W start_data);
+	bool entry_is_extended(state_entry const &entry) const;
 	u32 signature() const;
 	void dump_registry() const;
 	static std::pair<save_error, std::string> validate_header(const u8 *header, const char *gamename, u32 signature);
@@ -348,6 +372,7 @@ private:
 	std::vector<std::unique_ptr<ram_state>>      m_ramstate_list;    // list of ram states
 	std::vector<std::unique_ptr<state_callback>> m_presave_list;     // list of pre-save functions
 	std::vector<std::unique_ptr<state_callback>> m_postload_list;    // list of post-load functions
+	std::vector<extended_state_region>            m_extended_regions; // disk/bootstrap-only regions
 };
 
 class ram_state

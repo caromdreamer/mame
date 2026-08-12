@@ -121,11 +121,11 @@ void kaileron_state_store::set_capacity(u32 capacity) noexcept
 
 bool kaileron_state_store::ensure_snapshot_size()
 {
-	size_t const size = ram_state::get_size(m_machine.save());
+	size_t const size = m_machine.save().transient_state_size();
 	if (size == 0 || size > std::numeric_limits<u32>::max())
 		return false;
 
-	u32 const signature = m_machine.save().state_signature();
+	u32 const signature = m_machine.save().transient_state_signature();
 	if (m_snapshot_size == size && m_snapshot_signature == signature)
 		return true;
 
@@ -160,7 +160,7 @@ bool kaileron_state_store::save_machine_state(std::vector<u8> &bytes)
 		return false;
 
 	bytes.resize(m_snapshot_size);
-	return m_machine.save().write_buffer_with_signature(
+	return m_machine.save().write_transient_buffer(
 			bytes.data(), bytes.size(), m_snapshot_signature) == STATERR_NONE;
 }
 
@@ -170,7 +170,7 @@ bool kaileron_state_store::load_machine_state(std::vector<u8> const &bytes)
 		return false;
 
 	invalidate_current_snapshot();
-	return m_machine.save().read_buffer_with_signature(
+	return m_machine.save().read_transient_buffer(
 			bytes.data(), bytes.size(), m_snapshot_signature) == STATERR_NONE;
 }
 
@@ -198,6 +198,8 @@ u64 kaileron_state_store::stable_state_hash(std::vector<u8> const &bytes) const
 	size_t payload_size = 0;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -214,6 +216,8 @@ u64 kaileron_state_store::stable_state_hash(std::vector<u8> const &bytes) const
 	size_t offset = bytes.size() - payload_size;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -244,7 +248,7 @@ bool kaileron_state_store::save(u32 frame)
 	ensure_snapshot_ring();
 	snapshot_slot &slot = m_snapshots[frame % m_snapshot_capacity];
 	slot.bytes.resize(m_snapshot_size);
-	if (m_machine.save().write_buffer_with_signature(
+	if (m_machine.save().write_transient_buffer(
 			slot.bytes.data(),
 			slot.bytes.size(),
 			m_snapshot_signature) != STATERR_NONE)
@@ -342,7 +346,7 @@ bool kaileron_state_store::restore_presentation()
 	// Presentation may process a user-requested exit while drawing its visible
 	// frame.  Restore the authoritative machine state even when that external
 	// request is pending; the request itself intentionally remains pending.
-	if (m_machine.save().read_buffer_with_signature(
+	if (m_machine.save().read_transient_buffer(
 			m_presentation_snapshot.data(),
 			m_presentation_snapshot.size(),
 			m_snapshot_signature) != STATERR_NONE)
@@ -362,6 +366,8 @@ bool kaileron_state_store::verify_presentation_restore()
 	size_t payload_size = 0;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -378,6 +384,8 @@ bool kaileron_state_store::verify_presentation_restore()
 	size_t offset = m_presentation_snapshot.size() - payload_size;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -422,20 +430,34 @@ bool kaileron_state_store::export_current(std::vector<u8> &bytes, u64 &state_has
 	if (!save_machine_state(bytes))
 		return false;
 
-	state_hash = stable_state_hash(bytes);
-	return state_hash != 0;
+	u64 const transient_hash = stable_state_hash(bytes);
+	if (transient_hash == 0)
+		return false;
+
+	std::vector<u8> extension;
+	if (!m_machine.save().write_extended_state(extension))
+		return false;
+	state_hash = transient_hash;
+	if (!extension.empty())
+		fnv1a64_append(state_hash, extension.data(), extension.size());
+	bytes.insert(bytes.end(), extension.begin(), extension.end());
+	return true;
 }
 
 bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &state_hash)
 {
 	if (!bytes || m_machine.scheduled_event_pending() || !ensure_snapshot_size())
 		return false;
-	if (size != m_snapshot_size)
+	if (size < m_snapshot_size)
 		return false;
 
 	invalidate_current_snapshot();
-	if (m_machine.save().read_buffer_with_signature(
-			bytes, size, m_snapshot_signature) != STATERR_NONE)
+	if (m_machine.save().read_transient_buffer(
+			bytes, m_snapshot_size, m_snapshot_signature) != STATERR_NONE)
+		return false;
+	if (!m_machine.save().read_extended_state(
+			bytes + m_snapshot_size,
+			size - m_snapshot_size))
 		return false;
 
 	for (snapshot_slot &slot : m_snapshots)
@@ -459,10 +481,14 @@ bool kaileron_state_store::import_current(std::string const &path, u64 &state_ha
 		return false;
 
 	std::ifstream input(path, std::ios::binary | std::ios::ate);
-	if (!input || input.tellg() != std::streamoff(m_snapshot_size))
+	if (!input)
+		return false;
+	std::streamoff const file_size = input.tellg();
+	if (file_size < std::streamoff(m_snapshot_size) ||
+			file_size > std::streamoff(std::numeric_limits<u32>::max()))
 		return false;
 	input.seekg(0);
-	std::vector<u8> bytes(m_snapshot_size);
+	std::vector<u8> bytes(static_cast<size_t>(file_size), u8(0));
 	input.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size()));
 	return input && import_current(bytes.data(), bytes.size(), state_hash);
 }
@@ -473,7 +499,7 @@ bool kaileron_state_store::write_current_manifest(std::string const &path, u32 f
 		return false;
 
 	std::vector<u8> bytes(m_snapshot_size);
-	if (m_machine.save().write_buffer_with_signature(
+	if (m_machine.save().write_transient_buffer(
 			bytes.data(), bytes.size(), m_snapshot_signature) != STATERR_NONE)
 		return false;
 	return write_manifest(path, frame, bytes);
@@ -519,6 +545,8 @@ bool kaileron_state_store::write_manifest(
 	size_t payload_size = 0;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -553,6 +581,8 @@ bool kaileron_state_store::write_manifest(
 	size_t offset = bytes.size() - payload_size;
 	for (int index = 0; index < save.registration_count(); index++)
 	{
+		if (save.indexed_item_is_extended(index))
+			continue;
 		void *base = nullptr;
 		u32 value_size = 0;
 		u32 value_count = 0;
@@ -596,6 +626,9 @@ bool kaileron_state_store::write_manifest(
 
 u64 kaileron_state_store::current_state_hash()
 {
+	// The SDK requests this on the hot per-frame path.  Program overlays are
+	// intentionally bootstrap-only and are hashed by export_current(); hashing
+	// their multi-megabyte payload here would make ordinary rollback CPU-bound.
 	if (!ensure_snapshot_size())
 	{
 		m_current_snapshot_valid = false;
@@ -603,7 +636,7 @@ u64 kaileron_state_store::current_state_hash()
 	}
 
 	m_presentation_snapshot.resize(m_snapshot_size);
-	if (m_machine.save().write_buffer_with_signature(
+	if (m_machine.save().write_transient_buffer(
 			m_presentation_snapshot.data(),
 			m_presentation_snapshot.size(),
 			m_snapshot_signature) != STATERR_NONE)

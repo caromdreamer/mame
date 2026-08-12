@@ -31,6 +31,11 @@
 #include "util/ioprocsfilter.h"
 #include "util/multibyte.h"
 
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <unordered_set>
+
 
 //**************************************************************************
 //  DEBUGGING
@@ -56,6 +61,32 @@ enum
 };
 
 #define STATE_MAGIC_NUM         "MAMESAVE"
+
+namespace {
+
+constexpr std::array<u8, 8> EXTENDED_STATE_MAGIC = { 'K', 'N', 'S', 'T', 'A', 'E', 'X', '1' };
+constexpr u32 EXTENDED_STATE_VERSION = 1;
+constexpr size_t EXTENDED_STATE_MAX_BYTES = 64U * 1024U * 1024U;
+constexpr size_t EXTENDED_STATE_MAX_NAME_BYTES = 255U;
+constexpr size_t EXTENDED_STATE_MERGE_GAP = 16U;
+
+void append_u32(std::vector<u8> &bytes, u32 value)
+{
+	size_t const offset = bytes.size();
+	bytes.resize(offset + sizeof(value));
+	put_u32le(bytes.data() + offset, value);
+}
+
+bool take_u32(u8 const *&cursor, u8 const *end, u32 &value)
+{
+	if (size_t(end - cursor) < sizeof(value))
+		return false;
+	value = get_u32le(cursor);
+	cursor += sizeof(value);
+	return true;
+}
+
+} // anonymous namespace
 
 //**************************************************************************
 //  INITIALIZATION
@@ -184,6 +215,374 @@ void save_manager::register_postload(save_prepost_delegate func)
 
 
 //-------------------------------------------------
+//  register_extended_state_region - register a
+//  disk/bootstrap-only region and capture its clean
+//  baseline immediately
+//-------------------------------------------------
+
+void save_manager::register_extended_state_region(std::string name, void *data, size_t size, bool portable_full)
+{
+	if (name.empty() || name.size() > EXTENDED_STATE_MAX_NAME_BYTES || !data ||
+			size == 0 || size > std::numeric_limits<u32>::max())
+		fatalerror("Invalid extended save state region registration (%s, %u bytes)\n", name.c_str(), u32(size));
+
+	for (extended_state_region const &region : m_extended_regions)
+		if (region.m_name == name)
+			fatalerror("Duplicate extended save state region (%s)\n", name.c_str());
+
+	extended_state_region region;
+	region.m_name = std::move(name);
+	region.m_data = static_cast<u8 *>(data);
+	region.m_baseline.assign(region.m_data, region.m_data + size);
+	region.m_baseline_crc = util::crc32_creator::simple(region.m_baseline.data(), u32(size));
+	region.m_portable_full = portable_full;
+	m_extended_regions.emplace_back(std::move(region));
+}
+
+
+//-------------------------------------------------
+//  register_memory_region_overlays - capture the
+//  post-initialisation ROM/data image used by MAME
+//-------------------------------------------------
+
+void save_manager::register_memory_region_overlays()
+{
+	// The program region is deliberately self-contained.  A state made while
+	// a translated or hacked ROM is running must load on the base set without
+	// needing the launcher to identify and compare two ROM archives.  Large
+	// graphics/sample regions remain outside this default portable policy.
+	memory_region *const region = machine().memory().region_find(":maincpu");
+	if (region && region->base() && region->bytes())
+		register_extended_state_region(
+				"memory-region::maincpu",
+				region->base(),
+				region->bytes(),
+				true);
+}
+
+
+//-------------------------------------------------
+//  write_extended_state - serialize changed spans
+//  from disk/bootstrap-only regions
+//-------------------------------------------------
+
+bool save_manager::write_extended_state(std::vector<u8> &bytes) const
+{
+	struct encoded_region
+	{
+		extended_state_region const *region;
+		std::vector<std::pair<u32, u32>> spans;
+		u32 current_crc;
+	};
+
+	std::vector<encoded_region> changed;
+	for (extended_state_region const &region : m_extended_regions)
+	{
+		size_t const size = region.m_baseline.size();
+		encoded_region encoded{ &region, {}, util::crc32_creator::simple(region.m_data, u32(size)) };
+		if (region.m_portable_full)
+		{
+			encoded.spans.emplace_back(0, u32(size));
+			changed.emplace_back(std::move(encoded));
+			continue;
+		}
+		size_t cursor = 0;
+		while (cursor < size)
+		{
+			while (cursor < size && region.m_data[cursor] == region.m_baseline[cursor])
+				cursor++;
+			if (cursor == size)
+				break;
+
+			size_t const start = cursor;
+			size_t last_difference = cursor;
+			for (cursor++; cursor < size; cursor++)
+			{
+				if (region.m_data[cursor] != region.m_baseline[cursor])
+					last_difference = cursor;
+				else if ((cursor - last_difference) > EXTENDED_STATE_MERGE_GAP)
+					break;
+			}
+			encoded.spans.emplace_back(u32(start), u32(last_difference + 1 - start));
+		}
+		if (!encoded.spans.empty())
+			changed.emplace_back(std::move(encoded));
+	}
+
+	bytes.clear();
+	if (m_extended_regions.empty())
+		return true;
+
+	bytes.insert(bytes.end(), EXTENDED_STATE_MAGIC.begin(), EXTENDED_STATE_MAGIC.end());
+	append_u32(bytes, EXTENDED_STATE_VERSION);
+	append_u32(bytes, 0); // total size, filled after the CRC is appended
+	append_u32(bytes, u32(changed.size()));
+	for (encoded_region const &encoded : changed)
+	{
+		extended_state_region const &region = *encoded.region;
+		append_u32(bytes, u32(region.m_name.size()));
+		append_u32(bytes, u32(region.m_baseline.size()));
+		append_u32(bytes, region.m_baseline_crc);
+		append_u32(bytes, encoded.current_crc);
+		append_u32(bytes, u32(encoded.spans.size()));
+		bytes.insert(bytes.end(), region.m_name.begin(), region.m_name.end());
+		for (auto const [offset, length] : encoded.spans)
+		{
+			append_u32(bytes, offset);
+			append_u32(bytes, length);
+			bytes.insert(bytes.end(), region.m_data + offset, region.m_data + offset + length);
+			if (bytes.size() > EXTENDED_STATE_MAX_BYTES)
+			{
+				bytes.clear();
+				return false;
+			}
+		}
+	}
+
+	if (bytes.size() > (EXTENDED_STATE_MAX_BYTES - sizeof(u32)))
+	{
+		bytes.clear();
+		return false;
+	}
+	append_u32(bytes, util::crc32_creator::simple(bytes.data(), u32(bytes.size())));
+	put_u32le(bytes.data() + 12, u32(bytes.size()));
+	// The total-size field participates in the checksum, so refresh it after
+	// filling the placeholder.
+	put_u32le(bytes.data() + bytes.size() - sizeof(u32),
+			util::crc32_creator::simple(bytes.data(), u32(bytes.size() - sizeof(u32))));
+	return true;
+}
+
+
+//-------------------------------------------------
+//  read_extended_state - validate and restore an
+//  optional disk/bootstrap-only extension
+//-------------------------------------------------
+
+bool save_manager::read_extended_state(void const *source, size_t size)
+{
+	auto reset_baselines = [this] ()
+	{
+		for (extended_state_region const &region : m_extended_regions)
+			std::memcpy(region.m_data, region.m_baseline.data(), region.m_baseline.size());
+	};
+
+	if (size == 0)
+		return true;
+	if (!source || size < (EXTENDED_STATE_MAGIC.size() + 4 * sizeof(u32)) ||
+			size > EXTENDED_STATE_MAX_BYTES || size > std::numeric_limits<u32>::max())
+		return false;
+
+	u8 const *const begin = static_cast<u8 const *>(source);
+	u8 const *cursor = begin;
+	u8 const *const payload_end = begin + size - sizeof(u32);
+	if (std::memcmp(cursor, EXTENDED_STATE_MAGIC.data(), EXTENDED_STATE_MAGIC.size()) != 0)
+		return false;
+	cursor += EXTENDED_STATE_MAGIC.size();
+
+	u32 version = 0;
+	u32 total_size = 0;
+	u32 region_count = 0;
+	if (!take_u32(cursor, payload_end, version) ||
+			!take_u32(cursor, payload_end, total_size) ||
+			!take_u32(cursor, payload_end, region_count) ||
+			version != EXTENDED_STATE_VERSION || total_size != size ||
+			region_count > m_extended_regions.size())
+		return false;
+
+	u32 const expected_crc = get_u32le(payload_end);
+	if (u32(util::crc32_creator::simple(begin, u32(size - sizeof(u32)))) != expected_crc)
+		return false;
+
+	struct decoded_region
+	{
+		extended_state_region const *region;
+		std::vector<u8> image;
+	};
+	std::vector<decoded_region> decoded;
+	std::unordered_set<std::string> names;
+	for (u32 index = 0; index < region_count; index++)
+	{
+		u32 name_size = 0;
+		u32 region_size = 0;
+		u32 baseline_crc = 0;
+		u32 current_crc = 0;
+		u32 span_count = 0;
+		if (!take_u32(cursor, payload_end, name_size) ||
+				!take_u32(cursor, payload_end, region_size) ||
+				!take_u32(cursor, payload_end, baseline_crc) ||
+				!take_u32(cursor, payload_end, current_crc) ||
+				!take_u32(cursor, payload_end, span_count) ||
+				name_size == 0 || name_size > EXTENDED_STATE_MAX_NAME_BYTES ||
+				size_t(payload_end - cursor) < name_size)
+			return false;
+
+		std::string name(reinterpret_cast<char const *>(cursor), name_size);
+		cursor += name_size;
+		if (!names.emplace(name).second)
+			return false;
+
+		auto const found = std::find_if(
+				m_extended_regions.begin(),
+				m_extended_regions.end(),
+				[&name] (extended_state_region const &candidate) { return candidate.m_name == name; });
+		if (found == m_extended_regions.end() || found->m_baseline.size() != region_size ||
+				(!found->m_portable_full && found->m_baseline_crc != baseline_crc) ||
+				span_count > region_size)
+			return false;
+
+		decoded_region item{ &*found, found->m_baseline };
+		u32 previous_end = 0;
+		bool portable_full_image = found->m_portable_full && span_count == 1;
+		for (u32 span = 0; span < span_count; span++)
+		{
+			u32 offset = 0;
+			u32 length = 0;
+			if (!take_u32(cursor, payload_end, offset) ||
+					!take_u32(cursor, payload_end, length) ||
+					length == 0 || offset < previous_end || offset > region_size ||
+					length > (region_size - offset) || size_t(payload_end - cursor) < length)
+				return false;
+			std::memcpy(item.image.data() + offset, cursor, length);
+			cursor += length;
+			previous_end = offset + length;
+			portable_full_image = portable_full_image && offset == 0 && length == region_size;
+		}
+		if (found->m_baseline_crc != baseline_crc && !portable_full_image)
+			return false;
+		if (u32(util::crc32_creator::simple(item.image.data(), u32(item.image.size()))) != current_crc)
+			return false;
+		decoded.emplace_back(std::move(item));
+	}
+	if (cursor != payload_end)
+		return false;
+
+	reset_baselines();
+	for (decoded_region const &item : decoded)
+		std::memcpy(item.region->m_data, item.image.data(), item.image.size());
+	return true;
+}
+
+
+//-------------------------------------------------
+//  entry_is_extended - identify a normal MAME save
+//  registration promoted to disk/bootstrap-only
+//-------------------------------------------------
+
+bool save_manager::entry_is_extended(state_entry const &entry) const
+{
+	size_t const entry_size = size_t(entry.m_typesize) * entry.m_typecount * entry.m_blockcount;
+	for (extended_state_region const &region : m_extended_regions)
+		if (entry.m_data == region.m_data && entry_size == region.m_baseline.size())
+			return true;
+	return false;
+}
+
+
+//-------------------------------------------------
+//  transient state helpers - fixed-size snapshots
+//  for rollback/runahead that exclude extended
+//  disk/bootstrap-only regions
+//-------------------------------------------------
+
+size_t save_manager::transient_state_size() const
+{
+	size_t size = HEADER_SIZE;
+	for (auto const &entry : m_entry_list)
+		if (!entry_is_extended(*entry))
+			size += size_t(entry->m_typesize) * entry->m_typecount * entry->m_blockcount;
+	return size;
+}
+
+u32 save_manager::transient_state_signature() const
+{
+	util::crc32_creator crc;
+	for (auto const &entry : m_entry_list)
+	{
+		if (entry_is_extended(*entry))
+			continue;
+		crc.append(entry->m_name.data(), entry->m_name.length());
+		u32 temp[4];
+		temp[0] = little_endianize_int32(entry->m_typesize);
+		temp[1] = little_endianize_int32(entry->m_typecount);
+		temp[2] = little_endianize_int32(entry->m_blockcount);
+		temp[3] = 0;
+		crc.append(&temp[0], sizeof(temp));
+	}
+	return crc.finish();
+}
+
+bool save_manager::indexed_item_is_extended(int index) const
+{
+	return index >= 0 && index < m_entry_list.size() && entry_is_extended(*m_entry_list[index]);
+}
+
+save_error save_manager::write_transient_buffer(void *buf, size_t size, u32 signature)
+{
+	if (!buf || size != transient_state_size() || signature != transient_state_signature())
+		return STATERR_WRITE_ERROR;
+
+	u8 *cursor = static_cast<u8 *>(buf);
+	u8 header[HEADER_SIZE] = { 0 };
+	std::memcpy(header, STATE_MAGIC_NUM, 8);
+	header[8] = SAVE_VERSION;
+	header[9] = NATIVE_ENDIAN_VALUE_LE_BE(0, SS_MSB_FIRST);
+	std::strncpy(reinterpret_cast<char *>(&header[0x0a]), machine().system().name, 0x1c - 0x0a);
+	put_u32le(&header[0x1c], signature);
+	std::memcpy(cursor, header, sizeof(header));
+	cursor += sizeof(header);
+
+	dispatch_presave();
+	for (auto const &entry : m_entry_list)
+	{
+		if (entry_is_extended(*entry))
+			continue;
+		u32 const block_size = entry->m_typesize * entry->m_typecount;
+		u8 const *data = static_cast<u8 const *>(entry->m_data);
+		for (u32 block = 0; block < entry->m_blockcount; block++, data += entry->m_stride)
+		{
+			std::memcpy(cursor, data, block_size);
+			cursor += block_size;
+		}
+	}
+	return cursor == (static_cast<u8 *>(buf) + size) ? STATERR_NONE : STATERR_WRITE_ERROR;
+}
+
+save_error save_manager::read_transient_buffer(void const *buf, size_t size, u32 signature)
+{
+	if (!buf || size != transient_state_size() || signature != transient_state_signature())
+		return STATERR_READ_ERROR;
+
+	u8 const *cursor = static_cast<u8 const *>(buf);
+	if (validate_header(cursor, machine().system().name, signature).first != STATERR_NONE)
+		return STATERR_INVALID_HEADER;
+	bool const flip = NATIVE_ENDIAN_VALUE_LE_BE(
+			(cursor[9] & SS_MSB_FIRST) != 0,
+			(cursor[9] & SS_MSB_FIRST) == 0);
+	cursor += HEADER_SIZE;
+
+	for (auto const &entry : m_entry_list)
+	{
+		if (entry_is_extended(*entry))
+			continue;
+		u32 const block_size = entry->m_typesize * entry->m_typecount;
+		u8 *data = static_cast<u8 *>(entry->m_data);
+		for (u32 block = 0; block < entry->m_blockcount; block++, data += entry->m_stride)
+		{
+			std::memcpy(data, cursor, block_size);
+			cursor += block_size;
+		}
+		if (flip)
+			entry->flip_data();
+	}
+	if (cursor != (static_cast<u8 const *>(buf) + size))
+		return STATERR_READ_ERROR;
+	dispatch_postload();
+	return STATERR_NONE;
+}
+
+
+//-------------------------------------------------
 //  save_memory - register an array of data in
 //  memory
 //-------------------------------------------------
@@ -288,7 +687,19 @@ save_error save_manager::write_file(util::core_file &file)
 				writer = util::zlib_write(file, 6, 16384);
 				return bool(writer);
 			});
-	return (STATERR_NONE != err) ? err : writer->finalize() ? STATERR_WRITE_ERROR : STATERR_NONE;
+	if (STATERR_NONE != err)
+		return err;
+
+	std::vector<u8> extension;
+	if (!write_extended_state(extension))
+		return STATERR_WRITE_ERROR;
+	if (!extension.empty())
+	{
+		auto const [writeerr, written] = write(*writer, extension.data(), extension.size());
+		if (writeerr || written != extension.size())
+			return STATERR_WRITE_ERROR;
+	}
+	return writer->finalize() ? STATERR_WRITE_ERROR : STATERR_NONE;
 }
 
 
@@ -299,7 +710,7 @@ save_error save_manager::write_file(util::core_file &file)
 save_error save_manager::read_file(util::core_file &file)
 {
 	util::read_stream::ptr reader;
-	return do_read(
+	save_error const err = do_read(
 			[] (size_t total_size) { return true; },
 			[&reader] (void *data, size_t size)
 			{
@@ -320,6 +731,24 @@ save_error save_manager::read_file(util::core_file &file)
 				reader = util::zlib_read(file, 16384);
 				return bool(reader);
 			});
+	if (STATERR_NONE != err)
+		return err;
+
+	std::vector<u8> extension;
+	std::array<u8, 16384> chunk;
+	for (;;)
+	{
+		std::size_t actual = 0;
+		std::error_condition const readerr = reader->read_some(chunk.data(), chunk.size(), actual);
+		if (readerr)
+			return STATERR_READ_ERROR;
+		if (!actual)
+			break;
+		if (extension.size() > EXTENDED_STATE_MAX_BYTES - actual)
+			return STATERR_READ_ERROR;
+		extension.insert(extension.end(), chunk.begin(), chunk.begin() + actual);
+	}
+	return read_extended_state(extension.data(), extension.size()) ? STATERR_NONE : STATERR_READ_ERROR;
 }
 
 

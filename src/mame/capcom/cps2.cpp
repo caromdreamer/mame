@@ -10936,6 +10936,17 @@ void cps2_state::init_cps2crypt()
 
 		// we have a proper key so use it to decrypt
 		cps2_decrypt(machine(), (uint16_t *)memregion("maincpu")->base(), m_decrypted_opcodes, memregion("maincpu")->bytes(), key, lower / 2, upper / 2);
+
+		// Carry the complete opcode view with portable states.  Together with the
+		// full maincpu region this lets a state created from a translated or hacked
+		// CPS2 set load on the base set without mixing its data reads with the
+		// base set's instruction stream.  Per-frame rollback/runahead snapshots
+		// still omit this four-megabyte region.
+		machine().save().register_extended_state_region(
+				"cps2.decrypted_opcodes",
+				m_decrypted_opcodes,
+				m_decrypted_opcodes.bytes(),
+				true);
 	}
 }
 
