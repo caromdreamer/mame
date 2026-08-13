@@ -466,6 +466,8 @@ bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &sta
 	m_presentation_snapshot_hash = 0;
 	m_current_snapshot_valid = false;
 	state_hash = current_state_hash();
+	if (state_hash != 0 && size > m_snapshot_size)
+		fnv1a64_append(state_hash, bytes + m_snapshot_size, size - m_snapshot_size);
 	return state_hash != 0;
 }
 

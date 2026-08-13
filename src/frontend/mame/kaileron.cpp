@@ -1291,9 +1291,21 @@ static KnResult KN_CALL kn_mame_export_serialized_state_at(
 	u64 hash = 0;
 	if (!bytes || !state_hash ||
 			!adapter.state_store.export_snapshot(frame, snapshot, hash) ||
-			snapshot.size() != len)
+			adapter.remote_bootstrap_buffer.size() != len ||
+			snapshot.size() > len)
+	{
+		adapter.remote_bootstrap_buffer.clear();
 		return KN_ERR_CALLBACK;
-	std::memcpy(bytes, snapshot.data(), len);
+	}
+
+	// serialized_state_size prepared a complete current bootstrap, including
+	// disk/bootstrap-only program regions.  Historical rollback slots contain
+	// only the transient prefix by design.  Preserve the prepared extension and
+	// replace that prefix with the requested confirmed frame so live spectators
+	// join at the checkpoint rather than replaying from frame zero.
+	std::memcpy(bytes, adapter.remote_bootstrap_buffer.data(), len);
+	std::memcpy(bytes, snapshot.data(), snapshot.size());
+	adapter.remote_bootstrap_buffer.clear();
 	*state_hash = hash;
 	return KN_OK;
 }

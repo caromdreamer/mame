@@ -173,10 +173,11 @@ public:
 	// Optional regions carried by disk save states and explicit bootstrap
 	// checkpoints, but deliberately excluded from ordinary RAM snapshots used
 	// by rewind, rollback and runahead.  The clean baseline is captured when a
-	// region is registered; serialized states contain only changed byte ranges.
+	// region is registered; serialized states use full images, baseline deltas,
+	// or lossless deltas against another registered program view.
 	void register_extended_state_region(std::string name, void *data, size_t size, bool portable_full = false);
 	void register_memory_region_overlays();
-	bool write_extended_state(std::vector<u8> &bytes) const;
+	bool write_extended_state(std::vector<u8> &bytes, bool self_contained = true) const;
 	bool read_extended_state(void const *bytes, size_t size);
 	size_t transient_state_size() const;
 	u32 transient_state_signature() const;
@@ -358,6 +359,7 @@ private:
 	template <typename T, typename U, typename V, typename W>
 	save_error do_read_known(size_t total_size, u32 signature, T check_length, U read_block, V start_header, W start_data);
 	bool entry_is_extended(state_entry const &entry) const;
+	bool region_is_save_backed(extended_state_region const &region) const;
 	u32 signature() const;
 	void dump_registry() const;
 	static std::pair<save_error, std::string> validate_header(const u8 *header, const char *gamename, u32 signature);
