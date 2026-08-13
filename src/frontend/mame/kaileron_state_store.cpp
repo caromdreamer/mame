@@ -23,13 +23,43 @@ u64 elapsed_us(std::chrono::steady_clock::time_point start)
 			std::chrono::steady_clock::now() - start).count();
 }
 
-void fnv1a64_append(u64 &hash, u8 const *bytes, std::size_t len)
+u64 read_u64_le(u8 const *bytes)
 {
-	for (std::size_t index = 0; index < len; index++)
+	return u64(bytes[0]) |
+			(u64(bytes[1]) << 8) |
+			(u64(bytes[2]) << 16) |
+			(u64(bytes[3]) << 24) |
+			(u64(bytes[4]) << 32) |
+			(u64(bytes[5]) << 40) |
+			(u64(bytes[6]) << 48) |
+			(u64(bytes[7]) << 56);
+}
+
+void fast_state_hash_append(u64 &hash, u8 const *bytes, std::size_t len)
+{
+	// State identity is compared only between peers on the same protocol
+	// epoch; it does not need the byte-at-a-time FNV value used by older
+	// builds.  Consume full words so multi-megabyte rollback states do not
+	// spend most of a frame in a serial multiply dependency chain.
+	constexpr u64 WORD_PRIME = 0x9e3779b185ebca87ULL;
+	constexpr u64 MIX_PRIME = 0xc2b2ae3d27d4eb4fULL;
+	constexpr u64 TAIL_PRIME = 0x165667b19e3779f9ULL;
+	std::size_t const original_len = len;
+	while (len >= sizeof(u64))
 	{
-		hash ^= bytes[index];
-		hash *= 1099511628211ULL;
+		u64 const word = read_u64_le(bytes);
+		hash ^= word + WORD_PRIME;
+		hash = ((hash << 27) | (hash >> 37)) * MIX_PRIME;
+		bytes += sizeof(u64);
+		len -= sizeof(u64);
 	}
+	while (len > 0)
+	{
+		hash ^= u64(*bytes++) * TAIL_PRIME;
+		hash = ((hash << 11) | (hash >> 53)) * WORD_PRIME;
+		len--;
+	}
+	hash ^= u64(original_len) * MIX_PRIME;
 }
 
 bool unstable_state_entry(char const *name)
@@ -229,8 +259,8 @@ u64 kaileron_state_store::stable_state_hash(std::vector<u8> const &bytes) const
 			return 0;
 		if (!unstable_state_entry(name))
 		{
-			fnv1a64_append(hash, reinterpret_cast<u8 const *>(name), std::strlen(name));
-			fnv1a64_append(hash, bytes.data() + offset, size);
+			fast_state_hash_append(hash, reinterpret_cast<u8 const *>(name), std::strlen(name));
+			fast_state_hash_append(hash, bytes.data() + offset, size);
 		}
 		offset += size;
 	}
@@ -247,15 +277,27 @@ bool kaileron_state_store::save(u32 frame)
 		return false;
 	ensure_snapshot_ring();
 	snapshot_slot &slot = m_snapshots[frame % m_snapshot_capacity];
-	slot.bytes.resize(m_snapshot_size);
-	if (m_machine.save().write_transient_buffer(
-			slot.bytes.data(),
-			slot.bytes.size(),
-			m_snapshot_signature) != STATERR_NONE)
-		return false;
-
 	slot.frame = frame;
-	slot.state_hash = stable_state_hash(slot.bytes);
+	if (m_current_snapshot_valid &&
+			m_presentation_snapshot.size() == m_snapshot_size &&
+			m_presentation_snapshot_hash != 0)
+	{
+		// The SDK asks for the current state hash immediately before saving
+		// this rollback frame.  Reuse that exact serialized image and hash
+		// instead of serializing and scanning a large state a second time.
+		slot.bytes = m_presentation_snapshot;
+		slot.state_hash = m_presentation_snapshot_hash;
+	}
+	else
+	{
+		slot.bytes.resize(m_snapshot_size);
+		if (m_machine.save().write_transient_buffer(
+				slot.bytes.data(),
+				slot.bytes.size(),
+				m_snapshot_signature) != STATERR_NONE)
+			return false;
+		slot.state_hash = stable_state_hash(slot.bytes);
+	}
 	slot.valid = true;
 	m_last_snapshot_size = u32(slot.bytes.size());
 	m_save_count++;
@@ -439,7 +481,7 @@ bool kaileron_state_store::export_current(std::vector<u8> &bytes, u64 &state_has
 		return false;
 	state_hash = transient_hash;
 	if (!extension.empty())
-		fnv1a64_append(state_hash, extension.data(), extension.size());
+		fast_state_hash_append(state_hash, extension.data(), extension.size());
 	bytes.insert(bytes.end(), extension.begin(), extension.end());
 	return true;
 }
@@ -467,7 +509,7 @@ bool kaileron_state_store::import_current(u8 const *bytes, size_t size, u64 &sta
 	m_current_snapshot_valid = false;
 	state_hash = current_state_hash();
 	if (state_hash != 0 && size > m_snapshot_size)
-		fnv1a64_append(state_hash, bytes + m_snapshot_size, size - m_snapshot_size);
+		fast_state_hash_append(state_hash, bytes + m_snapshot_size, size - m_snapshot_size);
 	return state_hash != 0;
 }
 
@@ -601,8 +643,8 @@ bool kaileron_state_store::write_manifest(
 			return ch == '\t' || ch == '\r' || ch == '\n';
 		}, ' ');
 		u64 hash = 1469598103934665603ULL;
-		fnv1a64_append(hash, reinterpret_cast<u8 const *>(raw_name), std::strlen(raw_name));
-		fnv1a64_append(hash, bytes.data() + offset, size);
+		fast_state_hash_append(hash, reinterpret_cast<u8 const *>(raw_name), std::strlen(raw_name));
+		fast_state_hash_append(hash, bytes.data() + offset, size);
 		output << name << '\t'
 			   << (unstable_state_entry(raw_name) ? 0 : 1) << '\t'
 			   << size << '\t'
