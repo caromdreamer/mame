@@ -283,10 +283,14 @@ bool kaileron_state_store::save(u32 frame)
 			m_presentation_snapshot_hash != 0)
 	{
 		// The SDK asks for the current state hash immediately before saving
-		// this rollback frame.  Reuse that exact serialized image and hash
-		// instead of serializing and scanning a large state a second time.
-		slot.bytes = m_presentation_snapshot;
+		// this rollback frame.  Transfer that exact serialized image and hash
+		// into the ring instead of copying a multi-megabyte state on every
+		// frame.  Swapping also keeps the previous slot allocation available
+		// as scratch storage for the next current_state_hash() call.
+		slot.bytes.swap(m_presentation_snapshot);
 		slot.state_hash = m_presentation_snapshot_hash;
+		m_presentation_snapshot_hash = 0;
+		m_current_snapshot_valid = false;
 	}
 	else
 	{
