@@ -29,7 +29,7 @@ public:
 	bool export_current(std::string const &path, u64 &state_hash);
 	bool import_current(std::string const &path, u64 &state_hash);
 	bool write_current_manifest(std::string const &path, u32 frame);
-	bool export_snapshot(u32 frame, std::vector<u8> &bytes, u64 &state_hash) const;
+	bool export_snapshot(u32 frame, std::vector<u8> &bytes, u64 &state_hash);
 	bool export_snapshot(u32 frame, std::string const &path, u64 &state_hash);
 	bool write_snapshot_manifest(u32 frame, std::string const &path);
 	u64 current_state_hash();
@@ -46,8 +46,11 @@ public:
 	u32 last_snapshot_size() const noexcept { return m_last_snapshot_size; }
 	u32 valid_slot_count() const noexcept;
 	u32 slot_capacity() const noexcept { return u32(m_snapshots.size()); }
+	u32 current_hash_count() const noexcept { return m_current_hash_count; }
 	u64 average_save_us() const noexcept;
 	u64 average_load_us() const noexcept;
+	u64 average_current_serialize_us() const noexcept;
+	u64 average_current_hash_us() const noexcept;
 	u64 average_presentation_save_us() const noexcept;
 	u64 average_presentation_restore_us() const noexcept;
 	u64 discard_time_us() const noexcept { return m_discard_time_us; }
@@ -86,12 +89,15 @@ private:
 	u32 m_presentation_reuse_count = 0;
 	u32 m_presentation_fallback_save_count = 0;
 	u32 m_discard_count = 0;
+	u32 m_current_hash_count = 0;
 	u32 m_last_snapshot_size = 0;
 	u64 m_save_time_us = 0;
 	u64 m_load_time_us = 0;
 	u64 m_presentation_save_time_us = 0;
 	u64 m_presentation_restore_time_us = 0;
 	u64 m_discard_time_us = 0;
+	u64 m_current_serialize_time_us = 0;
+	u64 m_current_hash_time_us = 0;
 	u64 m_presentation_snapshot_hash = 0;
 	bool m_current_snapshot_valid = false;
 	bool m_trace = false;

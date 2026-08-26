@@ -155,6 +155,8 @@
 "sega/system16.cpp"
 "seibu/bloodbro.cpp"
 "seibu/cabal.cpp"
+"seibu/goal92.cpp"
+"seibu/legionna.cpp"
 "seibu/mustache.cpp"
 "seibu/r2dx_v33.cpp"
 "seibu/raiden2.cpp"

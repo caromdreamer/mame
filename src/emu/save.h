@@ -369,6 +369,9 @@ private:
 	std::unique_ptr<rewinder> m_rewind;               // rewinder
 	bool                      m_reg_allowed;          // are registrations allowed?
 	bool                      m_supported;            // are saved states supported?
+	mutable size_t            m_transient_state_size_cache = 0;
+	mutable u32               m_transient_state_signature_cache = 0;
+	mutable bool              m_transient_state_signature_cached = false;
 
 	std::vector<std::unique_ptr<state_entry>>    m_entry_list;       // list of registered entries
 	std::vector<std::unique_ptr<ram_state>>      m_ramstate_list;    // list of ram states

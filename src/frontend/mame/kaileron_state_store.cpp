@@ -75,12 +75,25 @@ bool unstable_state_entry(char const *name)
 	// The output manager mirrors lamps and LEDs for host presentation.  Device
 	// postload handlers can immediately regenerate these values from core state.
 	bool const derived_host_output = entry.rfind("output/", 0) == 0;
+	// Rendering a speculative runahead frame advances the screen's partial-update
+	// cursor and lets screen-update callbacks populate tilemap scroll arrays.  The
+	// authoritative video registers/RAM remain in the snapshot and these values
+	// are restored with it, but their exact contents depend on how many frames a
+	// peer rendered for presentation and are not part of the emulated world ID.
+	bool const screen_partial_update_cursor = entry.rfind("Video Screen/", 0) == 0 &&
+			entry.size() >= 20 &&
+			entry.compare(entry.size() - 20, 20, "/m_last_partial_scan") == 0;
+	bool const tilemap_scroll_cache = entry.rfind("tilemap/", 0) == 0 &&
+			((entry.size() >= 12 && entry.compare(entry.size() - 12, 12, "/m_rowscroll") == 0) ||
+			 (entry.size() >= 12 && entry.compare(entry.size() - 12, 12, "/m_colscroll") == 0));
 	bool const asynchronous_sound_buffer = entry.rfind("stream.sound_stream", 0) == 0;
 	bool const z80_transient_scratch = entry.size() >= 17 &&
 			entry.compare(entry.size() - 17, 17, "/m_shared_data2.w") == 0;
 	return timer_heap_index ||
 			lua_scheduler_timer ||
 			derived_host_output ||
+			screen_partial_update_cursor ||
+			tilemap_scroll_cache ||
 			asynchronous_sound_buffer ||
 			z80_transient_scratch;
 }
@@ -282,9 +295,9 @@ bool kaileron_state_store::save(u32 frame)
 			m_presentation_snapshot.size() == m_snapshot_size &&
 			m_presentation_snapshot_hash != 0)
 	{
-		// The SDK asks for the current state hash immediately before saving
-		// this rollback frame.  Transfer that exact serialized image and hash
-		// into the ring instead of copying a multi-megabyte state on every
+		// A scheduled verification hash may already have serialized this exact
+		// rollback frame.  Transfer that image and hash into the ring instead of
+		// copying a multi-megabyte state on every
 		// frame.  Swapping also keeps the previous slot allocation available
 		// as scratch storage for the next current_state_hash() call.
 		slot.bytes.swap(m_presentation_snapshot);
@@ -300,7 +313,9 @@ bool kaileron_state_store::save(u32 frame)
 				slot.bytes.size(),
 				m_snapshot_signature) != STATERR_NONE)
 			return false;
-		slot.state_hash = stable_state_hash(slot.bytes);
+		// Rollback only needs the exact serialized bytes.  Hash cold-path slots
+		// lazily if they are later selected for verification or spectator export.
+		slot.state_hash = 0;
 	}
 	slot.valid = true;
 	m_last_snapshot_size = u32(slot.bytes.size());
@@ -556,10 +571,14 @@ bool kaileron_state_store::write_current_manifest(std::string const &path, u32 f
 bool kaileron_state_store::export_snapshot(
 		u32 frame,
 		std::vector<u8> &bytes,
-		u64 &state_hash) const
+		u64 &state_hash)
 {
-	snapshot_slot const *slot = find_slot(frame);
-	if (!slot || slot->state_hash == 0)
+	snapshot_slot *slot = find_slot(frame);
+	if (!slot)
+		return false;
+	if (slot->state_hash == 0)
+		slot->state_hash = stable_state_hash(slot->bytes);
+	if (slot->state_hash == 0)
 		return false;
 	bytes = slot->bytes;
 	state_hash = slot->state_hash;
@@ -571,11 +590,10 @@ bool kaileron_state_store::export_snapshot(
 		std::string const &path,
 		u64 &state_hash)
 {
-	snapshot_slot const *slot = find_slot(frame);
-	if (!slot)
+	std::vector<u8> bytes;
+	if (!export_snapshot(frame, bytes, state_hash))
 		return false;
-	state_hash = slot->state_hash;
-	return state_hash != 0 && write_binary_file(path, slot->bytes);
+	return write_binary_file(path, bytes);
 }
 
 bool kaileron_state_store::write_snapshot_manifest(u32 frame, std::string const &path)
@@ -674,15 +692,16 @@ bool kaileron_state_store::write_manifest(
 
 u64 kaileron_state_store::current_state_hash()
 {
-	// The SDK requests this on the hot per-frame path.  Program overlays are
-	// intentionally bootstrap-only and are hashed by export_current(); hashing
-	// their multi-megabyte payload here would make ordinary rollback CPU-bound.
+	// The SDK requests this for initial consensus, periodic verification and
+	// explicit checkpoint operations.  Program overlays are bootstrap-only and
+	// are hashed by export_current().
 	if (!ensure_snapshot_size())
 	{
 		m_current_snapshot_valid = false;
 		return 0;
 	}
 
+	auto const serialize_start = std::chrono::steady_clock::now();
 	m_presentation_snapshot.resize(m_snapshot_size);
 	if (m_machine.save().write_transient_buffer(
 			m_presentation_snapshot.data(),
@@ -692,8 +711,12 @@ u64 kaileron_state_store::current_state_hash()
 		m_current_snapshot_valid = false;
 		return 0;
 	}
+	m_current_serialize_time_us += elapsed_us(serialize_start);
 
+	auto const hash_start = std::chrono::steady_clock::now();
 	m_presentation_snapshot_hash = stable_state_hash(m_presentation_snapshot);
+	m_current_hash_time_us += elapsed_us(hash_start);
+	m_current_hash_count++;
 	m_current_snapshot_valid = m_presentation_snapshot_hash != 0;
 	return m_presentation_snapshot_hash;
 }
@@ -721,6 +744,16 @@ u64 kaileron_state_store::average_save_us() const noexcept
 u64 kaileron_state_store::average_load_us() const noexcept
 {
 	return m_load_count ? m_load_time_us / m_load_count : 0;
+}
+
+u64 kaileron_state_store::average_current_serialize_us() const noexcept
+{
+	return m_current_hash_count ? m_current_serialize_time_us / m_current_hash_count : 0;
+}
+
+u64 kaileron_state_store::average_current_hash_us() const noexcept
+{
+	return m_current_hash_count ? m_current_hash_time_us / m_current_hash_count : 0;
 }
 
 u64 kaileron_state_store::average_presentation_save_us() const noexcept

@@ -119,6 +119,13 @@ save_manager::save_manager(running_machine &machine)
 
 void save_manager::allow_registration(bool allowed)
 {
+	// The transient rollback layout can only change while registrations are
+	// allowed.  Drop the cached layout whenever that phase is entered or left;
+	// once registration closes, later hot-path queries can reuse it safely.
+	m_transient_state_size_cache = 0;
+	m_transient_state_signature_cache = 0;
+	m_transient_state_signature_cached = false;
+
 	// allow/deny registration
 	m_reg_allowed = allowed;
 	if (!allowed)
@@ -636,15 +643,23 @@ bool save_manager::region_is_save_backed(extended_state_region const &region) co
 
 size_t save_manager::transient_state_size() const
 {
+	if (!m_reg_allowed && m_transient_state_size_cache != 0)
+		return m_transient_state_size_cache;
+
 	size_t size = HEADER_SIZE;
 	for (auto const &entry : m_entry_list)
 		if (!entry_is_extended(*entry))
 			size += size_t(entry->m_typesize) * entry->m_typecount * entry->m_blockcount;
+	if (!m_reg_allowed)
+		m_transient_state_size_cache = size;
 	return size;
 }
 
 u32 save_manager::transient_state_signature() const
 {
+	if (!m_reg_allowed && m_transient_state_signature_cached)
+		return m_transient_state_signature_cache;
+
 	util::crc32_creator crc;
 	for (auto const &entry : m_entry_list)
 	{
@@ -658,7 +673,13 @@ u32 save_manager::transient_state_signature() const
 		temp[3] = 0;
 		crc.append(&temp[0], sizeof(temp));
 	}
-	return crc.finish();
+	u32 const signature = crc.finish();
+	if (!m_reg_allowed)
+	{
+		m_transient_state_signature_cache = signature;
+		m_transient_state_signature_cached = true;
+	}
+	return signature;
 }
 
 bool save_manager::indexed_item_is_extended(int index) const

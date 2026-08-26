@@ -352,6 +352,7 @@ struct kaileron_adapter::impl
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point last_status_at = {};
 	std::chrono::steady_clock::time_point last_chat_poll_at = {};
+	std::chrono::steady_clock::time_point low_speed_since = {};
 	std::vector<mapped_input_field> input_map;
 	std::vector<std::vector<u8>> presentation_inputs;
 	std::array<std::vector<u8>, KN_MAX_PLAYERS> debug_input;
@@ -373,6 +374,7 @@ struct kaileron_adapter::impl
 	bool chat_hotkey_down = false;
 	bool chat_enter_ready = false;
 	bool reported_exit = false;
+	bool reported_performance_warning = false;
 	bool in_advance = false;
 	bool networked = false;
 	bool spectator = false;
@@ -408,6 +410,45 @@ enum class determinism_bootstrap_result
 constexpr std::array<u32, 3> DETERMINISM_CHECKPOINT_FRAMES = {60, 300, 1200};
 // Avoid serializing MAME before device startup and postload paths are safe.
 constexpr u32 REMOTE_BOOTSTRAP_WARMUP_FRAMES = 60;
+constexpr double SUSTAINED_LOW_SPEED_THRESHOLD = 0.95;
+constexpr double SUSTAINED_SPEED_RECOVERY_THRESHOLD = 0.98;
+constexpr std::chrono::seconds SUSTAINED_LOW_SPEED_DURATION(5);
+
+static void report_sustained_low_speed(kaileron_adapter::impl &adapter)
+{
+	// Spectator catch-up and replay playback intentionally run at a nonstandard
+	// pace. Only suggest disabling an option that is actually active.
+	if (adapter.spectator || adapter.sdk_playback_override ||
+			adapter.runahead_frames == 0 || adapter.reported_performance_warning)
+	{
+		adapter.low_speed_since = {};
+		return;
+	}
+
+	double const speed = adapter.machine.video().speed_percent();
+	if (speed >= SUSTAINED_SPEED_RECOVERY_THRESHOLD)
+	{
+		adapter.low_speed_since = {};
+		return;
+	}
+	if (speed >= SUSTAINED_LOW_SPEED_THRESHOLD)
+		return;
+
+	auto const now = std::chrono::steady_clock::now();
+	if (adapter.low_speed_since == std::chrono::steady_clock::time_point{})
+	{
+		adapter.low_speed_since = now;
+		return;
+	}
+	if (now - adapter.low_speed_since < SUSTAINED_LOW_SPEED_DURATION)
+		return;
+
+	osd_printf_info(
+			"Kaileron performance: sustained_speed_percent=%.1f runahead=%u\n",
+			speed * 100.0,
+			adapter.runahead_frames);
+	adapter.reported_performance_warning = true;
+}
 
 static std::string determinism_path(
 		kaileron_adapter::impl const &adapter,
@@ -1991,6 +2032,7 @@ bool kaileron_adapter::tick()
 			m_impl->machine.schedule_exit();
 			return true;
 		}
+		report_sustained_low_speed(*m_impl);
 		update_playback_status_overlay(*m_impl);
 		if (m_impl->networked && m_impl->sdk_pace_delay_us > 0)
 		{
@@ -2032,7 +2074,7 @@ void kaileron_adapter::on_exit()
 	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) == KN_OK)
 	{
 		osd_printf_info(
-				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u stalls=%u pace_sleeps=%u pace_sleep_us=%llu frame_notifiers=%u rollback_replay_frames=%u spectator_catchup_frames=%u speculative_frames=%u runahead_frames=%u presentation_saves=%u presentation_restores=%u presentation_reuses=%u presentation_fallback_saves=%u presentation_save_avg_us=%llu presentation_restore_avg_us=%llu saves=%u loads=%u advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx confirmed_state_frame=%u confirmed_state_hash=%016llx missing=%u nacks=%u\n",
+				"kn_mame_adapter summary frames=%u mame_frames=%u confirmed=%u rollbacks=%u max_rollback=%u stalls=%u pace_sleeps=%u pace_sleep_us=%llu frame_notifiers=%u rollback_replay_frames=%u spectator_catchup_frames=%u speculative_frames=%u runahead_frames=%u presentation_saves=%u presentation_restores=%u presentation_reuses=%u presentation_fallback_saves=%u presentation_save_avg_us=%llu presentation_restore_avg_us=%llu saves=%u loads=%u state_hashes=%u state_serialize_avg_us=%llu state_hash_avg_us=%llu advances=%u injected=%u nonneutral=%u last_input=%02x snapshot_bytes=%u snapshot_slots=%u/%u save_avg_us=%llu load_avg_us=%llu advance_avg_us=%llu discard_us=%llu discarded=%u input_hash=%016llx state_hash=%016llx confirmed_state_frame=%u confirmed_state_hash=%016llx missing=%u nacks=%u\n",
 				metrics.current_frame,
 				m_impl->frame_runner.completed_frame_count(),
 				metrics.confirmed_frame_count,
@@ -2054,6 +2096,9 @@ void kaileron_adapter::on_exit()
 				(unsigned long long)m_impl->state_store.average_presentation_restore_us(),
 				m_impl->state_store.save_count(),
 				m_impl->state_store.load_count(),
+				m_impl->state_store.current_hash_count(),
+				(unsigned long long)m_impl->state_store.average_current_serialize_us(),
+				(unsigned long long)m_impl->state_store.average_current_hash_us(),
 				m_impl->frame_runner.advance_count(),
 				m_impl->injected_frame_count,
 				m_impl->nonneutral_input_count,
