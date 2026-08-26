@@ -46,6 +46,8 @@
 std::string g_kn_mame_status_overlay;
 std::string g_kn_mame_chat_overlay;
 std::string g_kn_mame_chat_input_overlay;
+std::string g_kn_mame_input_overlay_p1;
+std::string g_kn_mame_input_overlay_p2;
 bool g_kn_mame_chat_active = false;
 std::u32string g_kn_mame_chat_pending_chars;
 
@@ -208,6 +210,72 @@ static bool input_slot_pressed(const u8 *bytes, u32 len, u32 slot)
 	return bytes && byte < len && (bytes[byte] & bit);
 }
 
+static u32 button_slot(u32 button);
+
+static std::string format_input_state(const u8 *bytes, u32 len)
+{
+	static constexpr std::array<std::string_view, 16> BUTTON_LABELS = {
+		"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8",
+		"B9", "B10", "B11", "B12", "B13", "B14", "B15", "B16"};
+	static constexpr std::array<std::string_view, 3> SERVICE_LABELS = {"S2", "S3", "S4"};
+
+	std::string label;
+	label.reserve(48);
+	bool has_label = false;
+	auto append_label = [&label, &has_label] (std::string_view value)
+	{
+		if (has_label)
+			label.push_back(' ');
+		label.append(value);
+		has_label = true;
+	};
+
+	bool const up = input_slot_pressed(bytes, len, KN_SLOT_UP);
+	bool const down = input_slot_pressed(bytes, len, KN_SLOT_DOWN);
+	bool const left = input_slot_pressed(bytes, len, KN_SLOT_LEFT);
+	bool const right = input_slot_pressed(bytes, len, KN_SLOT_RIGHT);
+	if (up && left && !down && !right)
+		append_label("\xe2\x86\x96");
+	else if (up && right && !down && !left)
+		append_label("\xe2\x86\x97");
+	else if (down && left && !up && !right)
+		append_label("\xe2\x86\x99");
+	else if (down && right && !up && !left)
+		append_label("\xe2\x86\x98");
+	else
+	{
+		if (up)
+			append_label("\xe2\x86\x91");
+		if (down)
+			append_label("\xe2\x86\x93");
+		if (left)
+			append_label("\xe2\x86\x90");
+		if (right)
+			append_label("\xe2\x86\x92");
+	}
+
+	for (u32 button = 0; button < BUTTON_LABELS.size(); button++)
+	{
+		if (input_slot_pressed(bytes, len, button_slot(button)))
+			append_label(BUTTON_LABELS[button]);
+	}
+	if (input_slot_pressed(bytes, len, KN_SLOT_COIN))
+		append_label("COIN");
+	if (input_slot_pressed(bytes, len, KN_SLOT_START))
+		append_label("START");
+	if (input_slot_pressed(bytes, len, KN_SLOT_SERVICE_MODE))
+		append_label("TEST");
+	if (input_slot_pressed(bytes, len, KN_SLOT_SERVICE1))
+		append_label("S1");
+	for (u32 service = 1; service < 4; service++)
+	{
+		if (input_slot_pressed(bytes, len, KN_SLOT_SERVICE_EXTENSION_BASE + (service - 1)))
+			append_label(SERVICE_LABELS[service - 1]);
+	}
+
+	return has_label ? label : "\xc2\xb7";
+}
+
 static void clear_input_slot(u8 *bytes, u32 len, u32 slot)
 {
 	u32 byte = 0;
@@ -313,6 +381,13 @@ struct chat_overlay_message
 	std::chrono::steady_clock::time_point expires_at;
 };
 
+struct input_overlay_group
+{
+	u32 first_frame;
+	u32 last_frame;
+	std::vector<u8> bytes;
+};
+
 } // namespace
 
 struct kaileron_adapter::impl
@@ -357,12 +432,17 @@ struct kaileron_adapter::impl
 	std::vector<std::vector<u8>> presentation_inputs;
 	std::array<std::vector<u8>, KN_MAX_PLAYERS> debug_input;
 	std::array<bool, KN_MAX_PLAYERS> debug_input_enabled = {};
+	std::array<std::deque<input_overlay_group>, 2> input_overlay_history;
+	std::array<bool, 16> autofire_buttons = {};
+	std::array<bool, 16> autofire_held = {};
+	std::array<u32, 16> autofire_hold_start = {};
 	std::vector<u8> remote_bootstrap_buffer;
 	std::string last_status_text;
 	std::string chat_inbox_path;
 	std::string chat_outbox_path;
 	std::string determinism_dir;
 	std::string determinism_role;
+	std::string autofire_config_path;
 	std::string chat_text;
 	std::deque<chat_overlay_message> chat_messages;
 	u64 last_chat_id = 0;
@@ -387,6 +467,8 @@ struct kaileron_adapter::impl
 	u32 requested_runahead_frames = 0;
 	u32 runahead_frames = 0;
 	u32 presentation_sdk_frame = 0;
+	u32 autofire_interval = 2;
+	u32 autofire_last_config_frame = std::numeric_limits<u32>::max();
 	socd_mode local_socd_mode = socd_mode::up_priority;
 	bool sdk_playback_override = false;
 	bool rollback_replay_active = false;
@@ -394,11 +476,135 @@ struct kaileron_adapter::impl
 	bool verify_presentation_restore = false;
 	bool show_playback_status = false;
 	bool show_rollback_stats = false;
+	bool show_input_overlay = false;
 	bool fixed_rtc_enabled = false;
+	bool autofire_allowed = false;
 	bool remote_bootstrap_enabled = false;
 	bool determinism_bootstrap_ready = false;
 	std::array<bool, 3> determinism_checkpoints_written = {false, false, false};
 };
+
+constexpr u32 INPUT_OVERLAY_ROWS = 13;
+constexpr u32 INPUT_OVERLAY_IDLE_RESET_FRAMES = 120;
+
+static bool input_overlay_neutral(const u8 *bytes, u32 len)
+{
+	return !bytes || std::none_of(bytes, bytes + len, [] (u8 value) { return value != 0; });
+}
+
+static bool input_overlay_neutral(std::vector<u8> const &bytes)
+{
+	return input_overlay_neutral(bytes.data(), u32(bytes.size()));
+}
+
+static bool input_overlay_matches(std::vector<u8> const &bytes, KnInput const &input)
+{
+	return bytes.size() == input.len &&
+			(input.len == 0 || (input.bytes && !std::memcmp(bytes.data(), input.bytes, input.len)));
+}
+
+static u32 input_overlay_duration(input_overlay_group const &group)
+{
+	return group.last_frame >= group.first_frame
+			? group.last_frame - group.first_frame + 1
+			: 0;
+}
+
+static std::string format_input_history(
+		std::deque<input_overlay_group> const &history,
+		u32 player)
+{
+	if (history.empty())
+		return {};
+
+	auto const origin = std::find_if(
+			history.begin(),
+			history.end(),
+			[] (input_overlay_group const &group) { return !input_overlay_neutral(group.bytes); });
+	if (origin == history.end())
+		return {};
+
+	std::ostringstream overlay;
+	overlay << 'P' << (player + 1);
+
+	u32 rows = 0;
+	for (std::size_t index = history.size(); index > 0 && rows < INPUT_OVERLAY_ROWS; index--)
+	{
+		input_overlay_group const &group = history[index - 1];
+		if (input_overlay_neutral(group.bytes))
+			continue;
+
+		u32 const relative_frame = group.first_frame - origin->first_frame;
+		overlay << '\n'
+				<< std::setfill('0') << std::setw(3) << std::min<u32>(999, relative_frame) << "  "
+				<< format_input_state(group.bytes.data(), u32(group.bytes.size()));
+		rows++;
+	}
+	return rows ? overlay.str() : std::string{};
+}
+
+static void record_input_history(
+		kaileron_adapter::impl &adapter,
+		u32 frame,
+		const KnInput *players,
+		u32 player_count)
+{
+	// This is presentation-only state.  SDK frame numbers let rollback
+	// resimulation replace the affected suffix instead of duplicating it.
+	for (u32 player = 0; player < adapter.input_overlay_history.size(); player++)
+	{
+		if (!players || player >= player_count)
+			continue;
+
+		std::deque<input_overlay_group> &history = adapter.input_overlay_history[player];
+		KnInput const &input = players[player];
+
+		if (!history.empty() && frame < history.front().first_frame)
+			history.clear();
+		while (!history.empty() && history.back().first_frame >= frame)
+			history.pop_back();
+		if (!history.empty() && history.back().last_frame >= frame)
+		{
+			history.back().last_frame = frame - 1;
+			if (history.back().last_frame < history.back().first_frame)
+				history.pop_back();
+		}
+
+		bool const neutral = input_overlay_neutral(input.bytes, input.len);
+		if (history.empty() && neutral)
+			continue;
+		if (!neutral && !history.empty() &&
+				input_overlay_neutral(history.back().bytes) &&
+				input_overlay_duration(history.back()) >= INPUT_OVERLAY_IDLE_RESET_FRAMES)
+		{
+			history.clear();
+		}
+
+		if (!history.empty() && history.back().last_frame + 1 == frame && input_overlay_matches(history.back().bytes, input))
+			history.back().last_frame = frame;
+		else
+		{
+			std::vector<u8> bytes;
+			if (input.bytes && input.len)
+				bytes.assign(input.bytes, input.bytes + input.len);
+			history.push_back(input_overlay_group{frame, frame, std::move(bytes)});
+		}
+
+		u32 active_groups = u32(std::count_if(
+				history.begin(),
+				history.end(),
+				[] (input_overlay_group const &group) { return !input_overlay_neutral(group.bytes); }));
+		while (active_groups > INPUT_OVERLAY_ROWS && !history.empty())
+		{
+			if (!input_overlay_neutral(history.front().bytes))
+				active_groups--;
+			history.pop_front();
+		}
+	}
+
+	g_kn_mame_input_overlay_p1 = format_input_history(adapter.input_overlay_history[0], 0);
+	g_kn_mame_input_overlay_p2 = format_input_history(adapter.input_overlay_history[1], 1);
+}
 
 enum class determinism_bootstrap_result
 {
@@ -938,6 +1144,95 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	apply_socd_cleaning(adapter, bytes, len);
 }
 
+static void reload_native_autofire_config(kaileron_adapter::impl &adapter, u32 input_frame)
+{
+	if (adapter.autofire_config_path.empty())
+		return;
+	if (adapter.autofire_last_config_frame != std::numeric_limits<u32>::max() &&
+		(input_frame - adapter.autofire_last_config_frame) < 30)
+		return;
+	adapter.autofire_last_config_frame = input_frame;
+
+	std::array<bool, 16> buttons = {};
+	u32 interval = 2;
+	std::ifstream input(adapter.autofire_config_path);
+	std::string line;
+	while (std::getline(input, line))
+	{
+		if (line.rfind("interval=", 0) == 0)
+		{
+			u32 parsed = 0;
+			if (parse_u32(line.c_str() + 9, parsed) && parsed >= 2 && parsed <= 10)
+				interval = parsed;
+		}
+		else if (line.rfind("button=", 0) == 0)
+		{
+			u32 parsed = 0;
+			if (parse_u32(line.c_str() + 7, parsed) && parsed >= 1 && parsed <= buttons.size())
+				buttons[parsed - 1] = true;
+		}
+	}
+
+	if (buttons != adapter.autofire_buttons || interval != adapter.autofire_interval)
+	{
+		adapter.autofire_buttons = buttons;
+		adapter.autofire_interval = interval;
+		adapter.autofire_held.fill(false);
+		if (adapter.trace)
+		{
+			u32 count = u32(std::count(buttons.begin(), buttons.end(), true));
+			osd_printf_info(
+					"Kaileron trace: native_autofire buttons=%u interval=%u allowed=%u\n",
+					count,
+					interval,
+					adapter.autofire_allowed ? 1 : 0);
+		}
+	}
+}
+
+static void apply_native_autofire(
+		kaileron_adapter::impl &adapter,
+		u8 *bytes,
+		u32 len,
+		u32 input_frame)
+{
+	if (!adapter.autofire_allowed)
+	{
+		adapter.autofire_held.fill(false);
+		return;
+	}
+
+	reload_native_autofire_config(adapter, input_frame);
+	for (u32 button = 0; button < adapter.autofire_buttons.size(); button++)
+	{
+		if (!adapter.autofire_buttons[button])
+		{
+			adapter.autofire_held[button] = false;
+			continue;
+		}
+
+		u32 const slot = button_slot(button);
+		bool const pressed = input_slot_pressed(bytes, len, slot);
+		if (!pressed)
+		{
+			adapter.autofire_held[button] = false;
+			continue;
+		}
+		if (!adapter.autofire_held[button])
+		{
+			adapter.autofire_held[button] = true;
+			adapter.autofire_hold_start[button] = input_frame;
+		}
+		u32 const phase = (input_frame - adapter.autofire_hold_start[button]) % adapter.autofire_interval;
+		// A one-frame pulse is missed by a few games' command recognition.
+		// Keep the fastest cycles valid, but approximate a quick human tap
+		// with a three-frame pulse while preserving at least one release frame.
+		u32 const on_frames = std::min<u32>(3, adapter.autofire_interval - 1);
+		if (phase >= on_frames)
+			clear_input_slot(bytes, len, slot);
+	}
+}
+
 static bool parse_hex_bytes(std::string_view text, std::vector<u8> &out)
 {
 	if (text.empty() || (text.size() % 2) || text.size() > KN_MAX_PLAYERS * 8)
@@ -1191,6 +1486,7 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
 		read_local_input(*adapter, out_input->bytes, out_input->len);
+		apply_native_autofire(*adapter, out_input->bytes, out_input->len, input_frame);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
 			osd_printf_info("Kaileron trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
@@ -1252,6 +1548,8 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 
 	if (adapter->trace && adapter->state_store.load_count() > 0)
 		osd_printf_info("Kaileron trace: advance_frame frame=%u before mame_frames=%u loads=%u\n", frame, adapter->frame_runner.completed_frame_count(), adapter->state_store.load_count());
+	if (adapter->show_input_overlay)
+		record_input_history(*adapter, frame, players, player_count);
 
 	bool const skip_catchup_video = adapter->sdk_playback_override &&
 			adapter->sdk_render_interval > 1 &&
@@ -1495,6 +1793,10 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		g_kn_mame_status_overlay.clear();
 		g_kn_mame_chat_overlay.clear();
 		g_kn_mame_chat_input_overlay.clear();
+		g_kn_mame_input_overlay_p1.clear();
+		g_kn_mame_input_overlay_p2.clear();
+		for (auto &history : adapter->input_overlay_history)
+			history.clear();
 		g_kn_mame_chat_active = false;
 		g_kn_mame_chat_pending_chars.clear();
 		adapter->chat_messages.clear();
@@ -1813,9 +2115,15 @@ bool kaileron_adapter::initialize()
 	m_impl->verify_presentation_restore = env_enabled("KN_MAME_RUNAHEAD_VERIFY");
 	m_impl->show_playback_status = env_enabled("KN_MAME_STATUS");
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
+	m_impl->show_input_overlay = env_enabled("KN_MAME_SHOW_INPUTS");
 	m_impl->chat_inbox_path = env_value("KN_CHAT_INBOX", "");
 	m_impl->chat_outbox_path = env_value("KN_CHAT_OUTBOX", "");
 	m_impl->determinism_dir = env_value("KN_MAME_DETERMINISM_DIR", "");
+	bool const native_autofire = env_enabled("KN_AUTOFIRE_NATIVE");
+	m_impl->autofire_allowed = native_autofire && env_enabled("KN_AUTOFIRE_ALLOWED");
+	m_impl->autofire_config_path = native_autofire
+			? env_value("KN_AUTOFIRE_CONFIG", "")
+			: "";
 	m_impl->determinism_role = m_impl->spectator
 			? "s" + std::to_string(spectator_id)
 			: "p" + std::to_string(player_id);
@@ -1830,6 +2138,12 @@ bool kaileron_adapter::initialize()
 	if (m_impl->trace)
 	{
 		osd_printf_info("Kaileron trace: SOCD mode=%s\n", socd_mode_name(m_impl->local_socd_mode));
+		osd_printf_info("Kaileron trace: input_overlay=%u\n", m_impl->show_input_overlay ? 1 : 0);
+		osd_printf_info(
+				"Kaileron trace: native_autofire=%u allowed=%u config=%s\n",
+				native_autofire ? 1 : 0,
+				m_impl->autofire_allowed ? 1 : 0,
+				m_impl->autofire_config_path.c_str());
 		osd_printf_info(
 				"Kaileron trace: runahead requested=%u enabled=%u verify=%u spectator=%u replay=%u\n",
 				requested_runahead,
@@ -2061,6 +2375,8 @@ void kaileron_adapter::on_exit()
 	g_kn_mame_status_overlay.clear();
 	g_kn_mame_chat_overlay.clear();
 	g_kn_mame_chat_input_overlay.clear();
+	g_kn_mame_input_overlay_p1.clear();
+	g_kn_mame_input_overlay_p2.clear();
 	g_kn_mame_chat_active = false;
 	g_kn_mame_chat_pending_chars.clear();
 

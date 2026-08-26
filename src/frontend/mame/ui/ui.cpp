@@ -151,6 +151,8 @@ std::string mame_ui_manager::messagebox_poptext;
 extern std::string g_kn_mame_status_overlay;
 extern std::string g_kn_mame_chat_overlay;
 extern std::string g_kn_mame_chat_input_overlay;
+extern std::string g_kn_mame_input_overlay_p1;
+extern std::string g_kn_mame_input_overlay_p2;
 
 // slider info
 std::vector<ui::menu_item> mame_ui_manager::slider_list;
@@ -1020,30 +1022,179 @@ bool mame_ui_manager::update_and_render(render_target &target)
 
 	if (!g_kn_mame_status_overlay.empty())
 		draw_text_box(current_ui_target(), g_kn_mame_status_overlay, ui::text_layout::text_justify::CENTER, 0.5F, 0.08F, colors().background_color());
-	auto draw_kaileron_overlay_text = [this] (std::string_view text, float x, float y, float scale)
+	auto draw_kaileron_overlay_text = [this] (
+			std::string_view text,
+			float x,
+			float y,
+			float width,
+			ui::text_layout::text_justify justify,
+			float scale)
 	{
 		render_target &target = current_ui_target();
-		float const wrap_width = 1.0F - (x * 2.0F);
 		float const dx = 2.0F / float(std::max<u32>(1, target.width()));
 		float const dy = 2.0F / float(std::max<u32>(1, target.height()));
 		float const text_size = get_line_height(target) * scale;
 		rgb_t const outline(0xf0, 0x00, 0x00, 0x00);
 		rgb_t const text_color(0xff, 0xff, 0xff, 0xff);
-		draw_text_full(target, text, x - dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x + dx, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x, y - dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x, y + dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x - dx, y - dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x + dx, y - dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x - dx, y + dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x + dx, y + dy, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x, y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
-		draw_text_full(target, text, x + (dx * 0.35F), y, wrap_width, ui::text_layout::text_justify::LEFT, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x - dx, y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x + dx, y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y - dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y + dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x - dx, y - dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x + dx, y - dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x - dx, y + dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x + dx, y + dy, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, outline, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x, y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
+		draw_text_full(target, text, x + (dx * 0.35F), y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
 	};
 	if (!g_kn_mame_chat_overlay.empty())
-		draw_kaileron_overlay_text(g_kn_mame_chat_overlay, 0.04F, 0.12F, 1.6F);
+		draw_kaileron_overlay_text(g_kn_mame_chat_overlay, 0.04F, 0.12F, 0.92F, ui::text_layout::text_justify::LEFT, 1.6F);
 	if (!g_kn_mame_chat_input_overlay.empty())
-		draw_kaileron_overlay_text(g_kn_mame_chat_input_overlay, 0.04F, 0.88F, 1.95F);
+		draw_kaileron_overlay_text(g_kn_mame_chat_input_overlay, 0.04F, 0.88F, 0.92F, ui::text_layout::text_justify::LEFT, 1.95F);
+	auto draw_kaileron_input_history = [this, &draw_kaileron_overlay_text] (
+			std::string_view history,
+			float x,
+			float y,
+			float width,
+			bool align_right)
+	{
+		if (history.empty())
+			return;
+
+		render_target &target = current_ui_target();
+		render_container &container = *target.ui_container();
+		float const base_height = get_line_height(target);
+		float const line_step = base_height * 1.18F;
+		float const text_size = base_height * 1.05F;
+		float const icon_size = line_step * 0.82F;
+		float const gap = icon_size * 0.24F;
+		float const dx = 1.5F / float(std::max<u32>(1, target.width()));
+		float const dy = 1.5F / float(std::max<u32>(1, target.height()));
+		u32 const blend = PRIMFLAG_BLENDMODE(BLENDMODE_ALPHA);
+		static constexpr std::array<rgb_t, 8> BUTTON_COLORS = {
+			rgb_t(0xff, 0xe5, 0x39, 0x35),
+			rgb_t(0xff, 0xfd, 0xd8, 0x35),
+			rgb_t(0xff, 0x43, 0xa0, 0x47),
+			rgb_t(0xff, 0x00, 0xac, 0xc1),
+			rgb_t(0xff, 0x1e, 0x88, 0xe5),
+			rgb_t(0xff, 0x8e, 0x24, 0xaa),
+			rgb_t(0xff, 0xfb, 0x8c, 0x00),
+			rgb_t(0xff, 0x75, 0x75, 0x75)};
+
+		auto draw_icon_text = [this, &target, dx, dy] (
+				std::string_view text,
+				float left,
+				float top,
+				float token_width,
+				float size,
+				rgb_t color,
+				ui::text_layout::text_justify justify)
+		{
+			draw_text_full(target, text, left + dx, top + dy, token_width, justify, ui::text_layout::word_wrapping::NEVER, NORMAL, rgb_t(0xe8, 0x00, 0x00, 0x00), rgb_t::transparent(), nullptr, nullptr, size);
+			draw_text_full(target, text, left, top, token_width, justify, ui::text_layout::word_wrapping::NEVER, NORMAL, color, rgb_t::transparent(), nullptr, nullptr, size);
+		};
+
+		std::size_t line_end = history.find('\n');
+		std::string_view const heading = history.substr(0, line_end);
+		draw_kaileron_overlay_text(
+				heading,
+				x,
+				y,
+				width,
+				align_right ? ui::text_layout::text_justify::RIGHT : ui::text_layout::text_justify::LEFT,
+				1.15F);
+
+		u32 row = 0;
+		std::size_t line_start = line_end == std::string_view::npos ? history.size() : line_end + 1;
+		while (line_start < history.size())
+		{
+			line_end = history.find('\n', line_start);
+			std::string_view const line = history.substr(
+					line_start,
+					(line_end == std::string_view::npos ? history.size() : line_end) - line_start);
+			std::string_view const frame_text = line.substr(0, std::min<std::size_t>(3, line.size()));
+			std::array<std::string_view, 20> tokens;
+			u32 token_count = 0;
+			std::size_t token_start = line.find_first_not_of(' ', frame_text.size());
+			while (token_start != std::string_view::npos && token_count < tokens.size())
+			{
+				std::size_t const token_end = line.find(' ', token_start);
+				tokens[token_count++] = line.substr(
+						token_start,
+						(token_end == std::string_view::npos ? line.size() : token_end) - token_start);
+				token_start = token_end == std::string_view::npos
+						? std::string_view::npos
+						: line.find_first_not_of(' ', token_end);
+			}
+
+			float const frame_width = get_string_width(target, frame_text, text_size);
+			float total_width = frame_width + gap;
+			for (u32 index = 0; index < token_count; index++)
+			{
+				std::string_view const token = tokens[index];
+				bool const button = token.size() > 1 && token[0] == 'B' && token[1] >= '0' && token[1] <= '9';
+				bool const direction = !token.empty() && (u8(token[0]) & 0x80);
+				float const label_width = get_string_width(target, token, text_size * 0.72F) + gap;
+				total_width += (button || direction) ? icon_size : std::max(icon_size, label_width);
+				if (index + 1 < token_count)
+					total_width += gap;
+			}
+
+			float cursor = align_right ? x + width - total_width : x;
+			float const row_y = y + line_step * float(row + 1);
+			draw_icon_text(frame_text, cursor, row_y, frame_width, text_size, rgb_t(0xff, 0xd0, 0xd0, 0xd0), ui::text_layout::text_justify::LEFT);
+			cursor += frame_width + gap;
+			for (u32 index = 0; index < token_count; index++)
+			{
+				std::string_view const token = tokens[index];
+				bool const button = token.size() > 1 && token[0] == 'B' && token[1] >= '0' && token[1] <= '9';
+				bool const direction = !token.empty() && (u8(token[0]) & 0x80);
+				if (button)
+				{
+					u32 button_number = 0;
+					for (char ch : token.substr(1))
+					{
+						if (ch < '0' || ch > '9')
+							break;
+						button_number = button_number * 10 + u32(ch - '0');
+					}
+					rgb_t const button_color = BUTTON_COLORS[(std::max<u32>(1, button_number) - 1) % BUTTON_COLORS.size()];
+					float const center_x = cursor + icon_size * 0.5F;
+					float const center_y = row_y + icon_size * 0.52F;
+					container.add_point(center_x, center_y, icon_size * 1.04F, rgb_t(0xe8, 0x00, 0x00, 0x00), blend);
+					container.add_point(center_x, center_y, icon_size * 0.86F, button_color, blend);
+					std::string_view const number = token.substr(1);
+					rgb_t const number_color = button_number == 1 || button_number == 5 || button_number == 6
+							? rgb_t::white()
+							: rgb_t(0xff, 0x08, 0x08, 0x08);
+					draw_text_full(target, number, cursor, row_y + icon_size * 0.08F, icon_size, ui::text_layout::text_justify::CENTER, ui::text_layout::word_wrapping::NEVER, NORMAL, number_color, rgb_t::transparent(), nullptr, nullptr, text_size * 0.68F);
+					cursor += icon_size;
+				}
+				else if (direction)
+				{
+					draw_icon_text(token, cursor, row_y - icon_size * 0.05F, icon_size, text_size * 1.18F, rgb_t::white(), ui::text_layout::text_justify::CENTER);
+					cursor += icon_size;
+				}
+				else
+				{
+					float const token_width = std::max(icon_size, get_string_width(target, token, text_size * 0.72F) + gap);
+					container.add_rect(cursor, row_y + icon_size * 0.08F, cursor + token_width, row_y + icon_size * 0.88F, rgb_t(0xd8, 0x20, 0x20, 0x20), blend);
+					draw_icon_text(token, cursor, row_y + icon_size * 0.08F, token_width, text_size * 0.68F, rgb_t::white(), ui::text_layout::text_justify::CENTER);
+					cursor += token_width;
+				}
+				if (index + 1 < token_count)
+					cursor += gap;
+			}
+
+			row++;
+			if (line_end == std::string_view::npos)
+				break;
+			line_start = line_end + 1;
+		}
+	};
+	float const input_history_y = g_kn_mame_chat_overlay.empty() ? 0.12F : 0.32F;
+	draw_kaileron_input_history(g_kn_mame_input_overlay_p1, 0.04F, input_history_y, 0.38F, false);
+	draw_kaileron_input_history(g_kn_mame_input_overlay_p2, 0.58F, 0.12F, 0.38F, true);
 
 	// display the internal pointers
 	bool const pointer_update = m_pointers_changed;

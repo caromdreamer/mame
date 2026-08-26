@@ -12,6 +12,9 @@ local autofire = exports
 local frame_subscription, stop_subscription
 
 function autofire.startplugin()
+	if os.getenv('KN_AUTOFIRE_NATIVE') == '1' then
+		return require('autofire/kaileron_native').startplugin()
+	end
 
 	-- List of autofire buttons, each being a table with keys:
 	--   'port' - port name of the button being autofired
