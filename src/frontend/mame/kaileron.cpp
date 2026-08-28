@@ -48,6 +48,7 @@ std::string g_kn_mame_chat_overlay;
 std::string g_kn_mame_chat_input_overlay;
 std::string g_kn_mame_input_overlay_p1;
 std::string g_kn_mame_input_overlay_p2;
+std::string g_kn_mame_scoreboard_overlay;
 bool g_kn_mame_chat_active = false;
 std::u32string g_kn_mame_chat_pending_chars;
 
@@ -388,6 +389,62 @@ struct input_overlay_group
 	std::vector<u8> bytes;
 };
 
+// Game-specific score readers live behind this small definition so support can
+// grow without coupling the rollback SDK to any one game's memory layout.  The
+// signature is checked after the game program has reached RAM; this prevents a
+// matching shortname with a different program revision from being read using
+// stale addresses.
+struct game_score_observer_definition
+{
+	std::string_view game_id;
+	std::string_view cpu_tag;
+	u32 signature_address;
+	std::array<u32, 16> signature;
+	u32 side_address;
+	u32 wins_address;
+};
+
+struct game_score_observation
+{
+	u32 side = 0;
+	u32 wins = 0;
+
+	bool operator==(game_score_observation const &other) const
+	{
+		return side == other.side && wins == other.wins;
+	}
+
+	bool operator!=(game_score_observation const &other) const
+	{
+		return !(*this == other);
+	}
+};
+
+// Tekken Tag Tournament US TEG3/VER.C1.  The writer at 0x801289b4 stores the
+// current streak holder at gp+0x2fc and WINS at gp+0x300.  MAME exposes the
+// emulated physical RAM addresses, so these remain stable across host process
+// restarts even though ordinary host pointers do not.
+constexpr game_score_observer_definition TEKTAGTUC1_SCORE_OBSERVER = {
+	"tektagtuc1",
+	"maincpu",
+	0x001289b4,
+	{
+		0x10600007, 0x286203e8, 0x3c028024, 0x9042354e,
+		0x00000000, 0xaf8202fc, 0x0804a276, 0x286203e8,
+		0xaf8002fc, 0x14400004, 0x240203e7, 0xaf820300,
+		0x03e00008, 0x00000000, 0xaf830300, 0x03e00008,
+	},
+	0x00242fbc,
+	0x00242fc0,
+};
+
+game_score_observer_definition const *score_observer_for_game(std::string_view game_id)
+{
+	return game_id == TEKTAGTUC1_SCORE_OBSERVER.game_id
+			? &TEKTAGTUC1_SCORE_OBSERVER
+			: nullptr;
+}
+
 } // namespace
 
 struct kaileron_adapter::impl
@@ -427,12 +484,19 @@ struct kaileron_adapter::impl
 	u8 last_applied_input[2] = {0xff, 0xff};
 	std::chrono::steady_clock::time_point last_status_at = {};
 	std::chrono::steady_clock::time_point last_chat_poll_at = {};
+	std::chrono::steady_clock::time_point last_scoreboard_poll_at = {};
 	std::chrono::steady_clock::time_point low_speed_since = {};
 	std::vector<mapped_input_field> input_map;
 	std::vector<std::vector<u8>> presentation_inputs;
 	std::array<std::vector<u8>, KN_MAX_PLAYERS> debug_input;
 	std::array<bool, KN_MAX_PLAYERS> debug_input_enabled = {};
+	u32 debug_control_player = 0;
 	std::array<std::deque<input_overlay_group>, 2> input_overlay_history;
+	game_score_observer_definition const *score_observer = nullptr;
+	address_space *score_observer_space = nullptr;
+	game_score_observation score_candidate;
+	game_score_observation score_published;
+	u32 score_candidate_frame = 0;
 	std::array<bool, 16> autofire_buttons = {};
 	std::array<bool, 16> autofire_held = {};
 	std::array<u32, 16> autofire_hold_start = {};
@@ -440,6 +504,7 @@ struct kaileron_adapter::impl
 	std::string last_status_text;
 	std::string chat_inbox_path;
 	std::string chat_outbox_path;
+	std::string scoreboard_overlay_path;
 	std::string determinism_dir;
 	std::string determinism_role;
 	std::string autofire_config_path;
@@ -477,6 +542,9 @@ struct kaileron_adapter::impl
 	bool show_playback_status = false;
 	bool show_rollback_stats = false;
 	bool show_input_overlay = false;
+	bool score_signature_valid = false;
+	bool score_candidate_valid = false;
+	bool score_published_valid = false;
 	bool fixed_rtc_enabled = false;
 	bool autofire_allowed = false;
 	bool remote_bootstrap_enabled = false;
@@ -486,6 +554,81 @@ struct kaileron_adapter::impl
 
 constexpr u32 INPUT_OVERLAY_ROWS = 13;
 constexpr u32 INPUT_OVERLAY_IDLE_RESET_FRAMES = 120;
+
+static bool prepare_score_observer(kaileron_adapter::impl &adapter)
+{
+	auto const *definition = adapter.score_observer;
+	if (!definition)
+		return false;
+
+	if (!adapter.score_observer_space)
+	{
+		device_t *const device = adapter.machine.root_device().subdevice(definition->cpu_tag.data());
+		auto *const memory = dynamic_cast<device_memory_interface *>(device);
+		if (!memory || !memory->has_space(AS_PROGRAM))
+			return false;
+		adapter.score_observer_space = &memory->space(AS_PROGRAM);
+	}
+
+	if (!adapter.score_signature_valid)
+	{
+		for (u32 index = 0; index < definition->signature.size(); index++)
+		{
+			if (adapter.score_observer_space->read_dword(
+					definition->signature_address + index * 4) != definition->signature[index])
+				return false;
+		}
+		adapter.score_signature_valid = true;
+		osd_printf_info(
+				"Kaileron score: observer_ready game=%s side_address=%08x wins_address=%08x\n",
+				definition->game_id.data(),
+				definition->side_address,
+				definition->wins_address);
+	}
+
+	return true;
+}
+
+static void update_score_observer(kaileron_adapter::impl &adapter, KnMetrics const &metrics)
+{
+	if (!prepare_score_observer(adapter))
+		return;
+
+	game_score_observation const current = {
+		adapter.score_observer_space->read_dword(adapter.score_observer->side_address),
+		adapter.score_observer_space->read_dword(adapter.score_observer->wins_address),
+	};
+	if (current.side > 1 || current.wins > 999)
+		return;
+
+	if (!adapter.score_candidate_valid || current != adapter.score_candidate)
+	{
+		adapter.score_candidate = current;
+		adapter.score_candidate_frame = metrics.current_frame;
+		adapter.score_candidate_valid = true;
+	}
+
+	u32 const confirmed_frame = adapter.networked
+			? metrics.confirmed_frame_count
+			: metrics.current_frame;
+	// Only publish a value after the frame where it first appeared is confirmed.
+	// A speculative value corrected by rollback changes the candidate before it
+	// can reach this point. Serverless sessions have no confirmation stream, so
+	// their current authoritative frame is final by definition.
+	if (confirmed_frame < adapter.score_candidate_frame ||
+			(adapter.score_published_valid && adapter.score_published == current))
+		return;
+
+	adapter.score_published = current;
+	adapter.score_published_valid = true;
+	osd_printf_info(
+			"Kaileron score: game=%s frame=%u confirmed=%u side=%u wins=%u\n",
+			adapter.score_observer->game_id.data(),
+			adapter.score_candidate_frame,
+			confirmed_frame,
+			current.side,
+			current.wins);
+}
 
 static bool input_overlay_neutral(const u8 *bytes, u32 len)
 {
@@ -1316,6 +1459,32 @@ static void register_debug_bridge_commands(kaileron_adapter::impl &adapter)
 						"Kaileron debug input cleared for player %u\n", u32(player));
 			});
 	console.register_command(
+			"kncontrol",
+			CMDFLAG_NONE,
+			0,
+			1,
+			[&adapter] (std::vector<std::string_view> const &params) {
+				if (params.empty())
+				{
+					adapter.machine.debugger().console().printf(
+							"Kaileron manual control player %u\n",
+							adapter.debug_control_player);
+					return;
+				}
+				char *end = nullptr;
+				std::string const player_text(params[0]);
+				unsigned long const player = std::strtoul(player_text.c_str(), &end, 10);
+				if (!end || *end || player >= adapter.debug_input.size())
+				{
+					adapter.machine.debugger().console().printf(
+							"Usage: kncontrol [player]\n");
+					return;
+				}
+				adapter.debug_control_player = u32(player);
+				adapter.machine.debugger().console().printf(
+						"Kaileron manual control player set to %u\n", u32(player));
+			});
+	console.register_command(
 			"knframe",
 			CMDFLAG_NONE,
 			0,
@@ -1332,10 +1501,42 @@ static bool input_bit_pressed(KnInput const &input, mapped_input_field const &ma
 	return input.bytes && mapped.byte < input.len && (input.bytes[mapped.byte] & mapped.bit);
 }
 
-static bool mapped_input_pressed(const KnInput *players, u32 player_count, mapped_input_field const &mapped)
+static bool input_bytes_pressed(std::vector<u8> const &input, mapped_input_field const &mapped)
+{
+	return mapped.byte < input.size() && (input[mapped.byte] & mapped.bit);
+}
+
+static bool mapped_input_pressed(
+		kaileron_adapter::impl const &adapter,
+		const KnInput *players,
+		u32 player_count,
+		mapped_input_field const &mapped)
 {
 	if (!players)
 		return false;
+
+	if (env_enabled("KN_MAME_DEBUG_BRIDGE"))
+	{
+		bool const has_scripted_debug_input = std::any_of(
+				adapter.debug_input_enabled.begin(),
+				adapter.debug_input_enabled.end(),
+				[] (bool enabled) { return enabled; });
+		if (has_scripted_debug_input)
+		{
+			u32 const target_player = mapped.owner_only ? 0 : mapped.player;
+			return target_player < adapter.debug_input.size() &&
+					adapter.debug_input_enabled[target_player] &&
+					input_bytes_pressed(adapter.debug_input[target_player], mapped);
+		}
+
+		u32 const source_player = adapter.player_id < player_count ? adapter.player_id : 0;
+		if (source_player >= player_count)
+			return false;
+		if (mapped.owner_only)
+			return input_bit_pressed(players[source_player], mapped);
+		return mapped.player == adapter.debug_control_player &&
+				input_bit_pressed(players[source_player], mapped);
+	}
 
 	if (mapped.owner_only)
 	{
@@ -1382,7 +1583,7 @@ static void apply_mapped_inputs(
 	{
 		for (mapped_input_field &mapped : adapter.input_map)
 		{
-			bool const pressed = mapped_input_pressed(players, player_count, mapped);
+			bool const pressed = mapped_input_pressed(adapter, players, player_count, mapped);
 			set_live_field(mapped.field, pressed);
 		}
 	}
@@ -1795,6 +1996,7 @@ static void KN_CALL kn_mame_on_lifecycle_event(void *user, const KnLifecycleEven
 		g_kn_mame_chat_input_overlay.clear();
 		g_kn_mame_input_overlay_p1.clear();
 		g_kn_mame_input_overlay_p2.clear();
+		g_kn_mame_scoreboard_overlay.clear();
 		for (auto &history : adapter->input_overlay_history)
 			history.clear();
 		g_kn_mame_chat_active = false;
@@ -1839,6 +2041,35 @@ static void poll_chat_inbox(kaileron_adapter::impl &adapter)
 		std::string message = "<" + author + "> " + body;
 		append_chat_overlay(adapter, message);
 	}
+}
+
+static void poll_scoreboard_overlay(kaileron_adapter::impl &adapter)
+{
+	if (adapter.scoreboard_overlay_path.empty())
+		return;
+
+	auto const now = std::chrono::steady_clock::now();
+	if (adapter.last_scoreboard_poll_at.time_since_epoch().count() != 0 &&
+			now - adapter.last_scoreboard_poll_at < std::chrono::milliseconds(250))
+		return;
+	adapter.last_scoreboard_poll_at = now;
+
+	std::ifstream file(adapter.scoreboard_overlay_path, std::ios::binary);
+	if (!file)
+		return;
+
+	std::string text;
+	text.reserve(96);
+	char ch = 0;
+	while (text.size() < 160 && file.get(ch))
+	{
+		// The launcher writes a one-line ASCII presentation string.  Reject
+		// control bytes so a locally edited bridge file cannot disturb UI layout.
+		if (ch >= 0x20 && ch <= 0x7e)
+			text.push_back(ch);
+	}
+	if (!text.empty())
+		g_kn_mame_scoreboard_overlay = std::move(text);
 }
 
 static void show_chat_input(kaileron_adapter::impl &adapter)
@@ -2116,8 +2347,10 @@ bool kaileron_adapter::initialize()
 	m_impl->show_playback_status = env_enabled("KN_MAME_STATUS");
 	m_impl->show_rollback_stats = env_enabled("KN_MAME_SHOW_ROLLBACK_STATS");
 	m_impl->show_input_overlay = env_enabled("KN_MAME_SHOW_INPUTS");
+	m_impl->score_observer = score_observer_for_game(m_impl->machine.system().name);
 	m_impl->chat_inbox_path = env_value("KN_CHAT_INBOX", "");
 	m_impl->chat_outbox_path = env_value("KN_CHAT_OUTBOX", "");
+	m_impl->scoreboard_overlay_path = env_value("KN_SCOREBOARD_OVERLAY", "");
 	m_impl->determinism_dir = env_value("KN_MAME_DETERMINISM_DIR", "");
 	bool const native_autofire = env_enabled("KN_AUTOFIRE_NATIVE");
 	m_impl->autofire_allowed = native_autofire && env_enabled("KN_AUTOFIRE_ALLOWED");
@@ -2275,6 +2508,7 @@ bool kaileron_adapter::tick()
 	}
 
 	poll_chat_inbox(*m_impl);
+	poll_scoreboard_overlay(*m_impl);
 	refresh_chat_overlay(*m_impl);
 	process_chat_input(*m_impl);
 	m_impl->rollback_replay_active = false;
@@ -2295,6 +2529,13 @@ bool kaileron_adapter::tick()
 	}
 	else
 	{
+		if (m_impl->score_observer)
+		{
+			KnMetrics score_metrics = {};
+			if (m_impl->kn_host_session_get_metrics(m_impl->session, &score_metrics) == KN_OK)
+				update_score_observer(*m_impl, score_metrics);
+		}
+
 		if (!m_impl->determinism_dir.empty() && !m_impl->spectator)
 		{
 			KnMetrics metrics = {};
@@ -2377,6 +2618,7 @@ void kaileron_adapter::on_exit()
 	g_kn_mame_chat_input_overlay.clear();
 	g_kn_mame_input_overlay_p1.clear();
 	g_kn_mame_input_overlay_p2.clear();
+	g_kn_mame_scoreboard_overlay.clear();
 	g_kn_mame_chat_active = false;
 	g_kn_mame_chat_pending_chars.clear();
 

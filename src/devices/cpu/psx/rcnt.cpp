@@ -29,6 +29,14 @@ void psxrcnt_device::device_reset()
 
 void psxrcnt_device::device_post_load()
 {
+	// Kaileron snapshots already include each permanent emu_timer's complete
+	// schedule.  Re-adjusting it here changes m_start and can also advance
+	// n_start while merely loading a rollback frame, making the resumed path
+	// differ from an uninterrupted peer.  Preserve the serialized schedule for
+	// exact rollback restores while retaining upstream MAME behaviour otherwise.
+	if (std::getenv("KN_MAME"))
+		return;
+
 	for (int n = 0; n < 3; n++)
 		root_timer_adjust(n);
 }

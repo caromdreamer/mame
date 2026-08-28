@@ -153,6 +153,7 @@ extern std::string g_kn_mame_chat_overlay;
 extern std::string g_kn_mame_chat_input_overlay;
 extern std::string g_kn_mame_input_overlay_p1;
 extern std::string g_kn_mame_input_overlay_p2;
+extern std::string g_kn_mame_scoreboard_overlay;
 
 // slider info
 std::vector<ui::menu_item> mame_ui_manager::slider_list;
@@ -1047,6 +1048,8 @@ bool mame_ui_manager::update_and_render(render_target &target)
 		draw_text_full(target, text, x, y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
 		draw_text_full(target, text, x + (dx * 0.35F), y, width, justify, ui::text_layout::word_wrapping::WORD, NORMAL, text_color, rgb_t::transparent(), nullptr, nullptr, text_size);
 	};
+	if (!g_kn_mame_scoreboard_overlay.empty())
+		draw_kaileron_overlay_text(g_kn_mame_scoreboard_overlay, 0.08F, 0.02F, 0.84F, ui::text_layout::text_justify::CENTER, 1.85F);
 	if (!g_kn_mame_chat_overlay.empty())
 		draw_kaileron_overlay_text(g_kn_mame_chat_overlay, 0.04F, 0.12F, 0.92F, ui::text_layout::text_justify::LEFT, 1.6F);
 	if (!g_kn_mame_chat_input_overlay.empty())

@@ -42,6 +42,12 @@ psxsio_device::psxsio_device(const machine_config &mconfig, device_type type, co
 
 void psxsio_device::device_post_load()
 {
+	// Kaileron restores the permanent SIO timer itself as part of the transient
+	// rollback snapshot.  Re-adjusting it here discards the serialized phase and
+	// makes peers with different rollback counts resume at different times.
+	if (std::getenv("KN_MAME"))
+		return;
+
 	sio_timer_adjust();
 }
 
