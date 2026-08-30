@@ -138,6 +138,28 @@ void windows_osd_interface::customize_input_type_list(std::vector<input_type_ent
 				entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F10, KEYCODE_LALT);
 				break;
 
+			// Kaileron local combination shortcuts.  Keep these on otherwise
+			// unused Windows OSD slots so adding shortcuts does not change the
+			// core input enum and force a full MAME rebuild.
+			case IPT_OSD_11:
+				entry.configure_osd("KAILERON_BUTTONS_1_2", N_p("input-name", "Kaileron A+B (Buttons 1+2)"));
+				break;
+			case IPT_OSD_12:
+				entry.configure_osd("KAILERON_BUTTONS_4_5", N_p("input-name", "Kaileron D+E (Buttons 4+5)"));
+				break;
+			case IPT_OSD_13:
+				entry.configure_osd("KAILERON_BUTTONS_1_4", N_p("input-name", "Kaileron A+D (Buttons 1+4)"));
+				break;
+			case IPT_OSD_14:
+				entry.configure_osd("KAILERON_BUTTONS_2_5", N_p("input-name", "Kaileron B+E (Buttons 2+5)"));
+				break;
+			case IPT_OSD_15:
+				entry.configure_osd("KAILERON_BUTTONS_2_4", N_p("input-name", "Kaileron B+D (Buttons 2+4)"));
+				break;
+			case IPT_OSD_16:
+				entry.configure_osd("KAILERON_BUTTONS_1_5", N_p("input-name", "Kaileron A+E (Buttons 1+5)"));
+				break;
+
 			// add a Not LALT condition to the throttle key
 			case IPT_UI_THROTTLE:
 				entry.defseq(SEQ_TYPE_STANDARD).set(KEYCODE_F10, input_seq::not_code, KEYCODE_LALT);
