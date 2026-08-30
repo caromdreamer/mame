@@ -169,6 +169,50 @@ void windows_osd_interface::customize_input_type_list(std::vector<input_type_ent
 			default:
 				break;
 		}
+
+	// The core OSD entries above provide the player 1 shortcuts.  Add matching
+	// entries for the remaining players so local multi-player/lab controls can
+	// configure each player's combination keys independently.
+	static constexpr ioport_type shortcut_types[] =
+	{
+		IPT_OSD_11,
+		IPT_OSD_12,
+		IPT_OSD_13,
+		IPT_OSD_14,
+		IPT_OSD_15,
+		IPT_OSD_16,
+	};
+	static constexpr char const *shortcut_names[] =
+	{
+		N_p("input-name", "Kaileron A+B (Buttons 1+2)"),
+		N_p("input-name", "Kaileron D+E (Buttons 4+5)"),
+		N_p("input-name", "Kaileron A+D (Buttons 1+4)"),
+		N_p("input-name", "Kaileron B+E (Buttons 2+5)"),
+		N_p("input-name", "Kaileron B+D (Buttons 2+4)"),
+		N_p("input-name", "Kaileron A+E (Buttons 1+5)"),
+	};
+	static constexpr char const *shortcut_tokens[MAX_PLAYERS - 1][std::size(shortcut_types)] =
+	{
+		{ "KAILERON_P2_BUTTONS_1_2", "KAILERON_P2_BUTTONS_4_5", "KAILERON_P2_BUTTONS_1_4", "KAILERON_P2_BUTTONS_2_5", "KAILERON_P2_BUTTONS_2_4", "KAILERON_P2_BUTTONS_1_5" },
+		{ "KAILERON_P3_BUTTONS_1_2", "KAILERON_P3_BUTTONS_4_5", "KAILERON_P3_BUTTONS_1_4", "KAILERON_P3_BUTTONS_2_5", "KAILERON_P3_BUTTONS_2_4", "KAILERON_P3_BUTTONS_1_5" },
+		{ "KAILERON_P4_BUTTONS_1_2", "KAILERON_P4_BUTTONS_4_5", "KAILERON_P4_BUTTONS_1_4", "KAILERON_P4_BUTTONS_2_5", "KAILERON_P4_BUTTONS_2_4", "KAILERON_P4_BUTTONS_1_5" },
+		{ "KAILERON_P5_BUTTONS_1_2", "KAILERON_P5_BUTTONS_4_5", "KAILERON_P5_BUTTONS_1_4", "KAILERON_P5_BUTTONS_2_5", "KAILERON_P5_BUTTONS_2_4", "KAILERON_P5_BUTTONS_1_5" },
+		{ "KAILERON_P6_BUTTONS_1_2", "KAILERON_P6_BUTTONS_4_5", "KAILERON_P6_BUTTONS_1_4", "KAILERON_P6_BUTTONS_2_5", "KAILERON_P6_BUTTONS_2_4", "KAILERON_P6_BUTTONS_1_5" },
+		{ "KAILERON_P7_BUTTONS_1_2", "KAILERON_P7_BUTTONS_4_5", "KAILERON_P7_BUTTONS_1_4", "KAILERON_P7_BUTTONS_2_5", "KAILERON_P7_BUTTONS_2_4", "KAILERON_P7_BUTTONS_1_5" },
+		{ "KAILERON_P8_BUTTONS_1_2", "KAILERON_P8_BUTTONS_4_5", "KAILERON_P8_BUTTONS_1_4", "KAILERON_P8_BUTTONS_2_5", "KAILERON_P8_BUTTONS_2_4", "KAILERON_P8_BUTTONS_1_5" },
+		{ "KAILERON_P9_BUTTONS_1_2", "KAILERON_P9_BUTTONS_4_5", "KAILERON_P9_BUTTONS_1_4", "KAILERON_P9_BUTTONS_2_5", "KAILERON_P9_BUTTONS_2_4", "KAILERON_P9_BUTTONS_1_5" },
+		{ "KAILERON_P10_BUTTONS_1_2", "KAILERON_P10_BUTTONS_4_5", "KAILERON_P10_BUTTONS_1_4", "KAILERON_P10_BUTTONS_2_5", "KAILERON_P10_BUTTONS_2_4", "KAILERON_P10_BUTTONS_1_5" },
+	};
+
+	for (int player = 1; player < MAX_PLAYERS; ++player)
+		for (unsigned shortcut = 0; shortcut < std::size(shortcut_types); ++shortcut)
+			typelist.emplace_back(
+					shortcut_types[shortcut],
+					ioport_group(IPG_PLAYER1 + player),
+					player,
+					shortcut_tokens[player - 1][shortcut],
+					shortcut_names[shortcut],
+					input_seq());
 }
 
 #endif // defined(OSD_WINDOWS)

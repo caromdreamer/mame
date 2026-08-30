@@ -1376,14 +1376,16 @@ static constexpr kaileron_button_shortcut KAILERON_BUTTON_SHORTCUTS[] =
 	{ IPT_OSD_16, 0x0011 }, // Buttons 1 + 5
 };
 
-static void apply_button_shortcuts(kaileron_adapter::impl &adapter, u8 *bytes, u32 len)
+static void apply_button_shortcuts(kaileron_adapter::impl &adapter, u8 *bytes, u32 len, u32 source_player)
 {
 	if (adapter.machine.ui().is_menu_active() || g_kn_mame_chat_active)
+		return;
+	if (source_player >= MAX_PLAYERS)
 		return;
 
 	for (kaileron_button_shortcut const &shortcut : KAILERON_BUTTON_SHORTCUTS)
 	{
-		if (!adapter.machine.ioport().type_pressed(shortcut.type))
+		if (!adapter.machine.ioport().type_pressed(shortcut.type, source_player))
 			continue;
 		for (u32 button = 0; button < 16; button++)
 		{
@@ -1413,7 +1415,7 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 		if ((mapped.owner_only || mapped.player == source_player) && mapped_local_input_pressed(adapter.machine, mapped))
 			set_input_bit(bytes, len, mapped.byte, mapped.bit);
 	}
-	apply_button_shortcuts(adapter, bytes, len);
+	apply_button_shortcuts(adapter, bytes, len, source_player);
 	apply_socd_cleaning(adapter, bytes, len);
 }
 

@@ -15,6 +15,7 @@
 #include "ui/ui.h"
 
 #include <algorithm>
+#include <iterator>
 
 
 namespace ui {
@@ -99,8 +100,20 @@ void menu_input_general::populate()
 		// iterate over the input ports and add menu items
 		for (const input_type_entry &entry : machine().ioport().types())
 		{
+			// Kaileron's local game-button shortcuts use otherwise-unused OSD
+			// input types to avoid expanding the core input enum.  They are game
+			// controls, though, so present them with the local player's controls
+			// instead of the UI hotkeys.  Kaileron remaps that local input to the
+			// participant's assigned network slot (P1 or P2) when play starts.
+			bool const kaileron_button_shortcut =
+					(entry.player() == 0) &&
+					(entry.group() == IPG_UI) &&
+					(entry.type() >= IPT_OSD_11) && (entry.type() <= IPT_OSD_16);
+			ioport_group const display_group =
+					kaileron_button_shortcut ? IPG_PLAYER1 : entry.group();
+
 			// add if we match the group and we have a valid name
-			if (entry.group() == group)
+			if (display_group == group)
 			{
 				std::string name = entry.name();
 				if (!name.empty())
@@ -114,7 +127,7 @@ void menu_input_general::populate()
 						item.seqtype = seqtype;
 						item.seq = machine().ioport().type_seq(entry.type(), entry.player(), seqtype);
 						item.defseq = &entry.defseq(seqtype);
-						item.group = entry.group();
+						item.group = display_group;
 						item.type = ioport_manager::type_is_analog(entry.type()) ? (INPUT_TYPE_ANALOG + seqtype) : INPUT_TYPE_DIGITAL;
 						item.name = name;
 						item.owner = nullptr;
@@ -126,6 +139,30 @@ void menu_input_general::populate()
 				}
 			}
 		}
+
+		// OSD entries naturally arrive at the end of the type list.  Keep the
+		// Kaileron shortcuts adjacent to the ordinary joystick/button mappings,
+		// before specialised Mahjong, Hanafuda and analog controls.
+		auto const shortcut_begin = std::find_if(
+				data.begin(),
+				data.end(),
+				[] (input_item_data const &item)
+				{
+					auto const entry = std::get_if<input_type_entry const *>(&item.ref);
+					return entry &&
+							((*entry)->type() >= IPT_OSD_11) &&
+							((*entry)->type() <= IPT_OSD_16);
+				});
+		auto const select = std::find_if(
+				data.begin(),
+				shortcut_begin,
+				[] (input_item_data const &item)
+				{
+					auto const entry = std::get_if<input_type_entry const *>(&item.ref);
+					return entry && ((*entry)->type() == IPT_SELECT);
+				});
+		if ((select != shortcut_begin) && (shortcut_begin != data.end()))
+			std::rotate(std::next(select), shortcut_begin, data.end());
 	}
 	else
 	{
