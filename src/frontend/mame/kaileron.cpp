@@ -487,6 +487,13 @@ struct kaileron_adapter::impl
 	std::chrono::steady_clock::time_point last_scoreboard_poll_at = {};
 	std::chrono::steady_clock::time_point low_speed_since = {};
 	std::vector<mapped_input_field> input_map;
+	struct dip_setting
+	{
+		std::string tag;
+		u32 mask = 0;
+		u32 value = 0;
+	};
+	std::vector<dip_setting> dip_settings;
 	std::vector<std::vector<u8>> presentation_inputs;
 	std::array<std::vector<u8>, KN_MAX_PLAYERS> debug_input;
 	std::array<bool, KN_MAX_PLAYERS> debug_input_enabled = {};
@@ -554,6 +561,95 @@ struct kaileron_adapter::impl
 
 constexpr u32 INPUT_OVERLAY_ROWS = 13;
 constexpr u32 INPUT_OVERLAY_IDLE_RESET_FRAMES = 120;
+
+static bool dip_port_tags_match(std::string_view selected, std::string_view runtime)
+{
+	if (!selected.empty() && selected.front() == ':')
+		selected.remove_prefix(1);
+	if (!runtime.empty() && runtime.front() == ':')
+		runtime.remove_prefix(1);
+	return selected == runtime;
+}
+
+static bool load_dip_settings(kaileron_adapter::impl &adapter)
+{
+	char const *const path = env_value("KN_MAME_DIP_SETTINGS", "");
+	if (!path[0])
+		return true;
+
+	std::ifstream input(path);
+	if (!input)
+	{
+		osd_printf_error("Kaileron: unable to open DIP switch settings %s\n", path);
+		return false;
+	}
+	std::string line;
+	while (std::getline(input, line))
+	{
+		if (line.empty())
+			continue;
+		std::istringstream fields(line);
+		std::string tag;
+		std::string mask_text;
+		std::string value_text;
+		if (!std::getline(fields, tag, '\t') ||
+				!std::getline(fields, mask_text, '\t') ||
+				!std::getline(fields, value_text) ||
+				tag.empty())
+		{
+			osd_printf_error("Kaileron: invalid DIP switch settings line\n");
+			return false;
+		}
+		u32 mask = 0;
+		u32 value = 0;
+		if (!parse_u32(mask_text.c_str(), mask) || !mask ||
+				!parse_u32(value_text.c_str(), value) || (value & ~mask))
+		{
+			osd_printf_error("Kaileron: invalid DIP switch value for %s\n", tag.c_str());
+			return false;
+		}
+		adapter.dip_settings.push_back({std::move(tag), mask, value});
+	}
+	return true;
+}
+
+static bool enforce_dip_settings(kaileron_adapter::impl &adapter, bool require_all)
+{
+	for (auto const &selected : adapter.dip_settings)
+	{
+		ioport_field *matched = nullptr;
+		for (auto &port : adapter.machine.ioport().ports())
+		{
+			if (!dip_port_tags_match(selected.tag, port.second->tag()))
+				continue;
+			for (ioport_field &field : port.second->fields())
+			{
+				if (field.type() == IPT_DIPSWITCH && field.mask() == selected.mask)
+				{
+					matched = &field;
+					break;
+				}
+			}
+			break;
+		}
+		if (!matched)
+		{
+			if (require_all)
+				osd_printf_error(
+						"Kaileron: DIP switch not found tag=%s mask=%08x\n",
+						selected.tag.c_str(), selected.mask);
+			return !require_all;
+		}
+		ioport_field::user_settings settings;
+		matched->get_user_settings(settings);
+		if ((settings.value & selected.mask) != selected.value)
+		{
+			settings.value = (settings.value & ~selected.mask) | selected.value;
+			matched->set_user_settings(settings);
+		}
+	}
+	return true;
+}
 
 static bool prepare_score_observer(kaileron_adapter::impl &adapter)
 {
@@ -2361,6 +2457,11 @@ bool kaileron_adapter::initialize()
 			? "s" + std::to_string(spectator_id)
 			: "p" + std::to_string(player_id);
 	m_impl->local_socd_mode = parse_socd_mode(env_value("KN_SOCD_MODE", "up_priority"));
+	if (!load_dip_settings(*m_impl) || !enforce_dip_settings(*m_impl, true))
+	{
+		show_kaileron_status(m_impl->machine, "Kaileron: DIP switch setup failed");
+		return false;
+	}
 	if (!m_impl->determinism_dir.empty())
 	{
 		osd_printf_info(
@@ -2486,6 +2587,10 @@ bool kaileron_adapter::tick()
 	if (!m_impl->initialized || !m_impl->session)
 		return false;
 	if (m_impl->machine.scheduled_event_pending())
+		return false;
+	// Room DIP settings are immutable session configuration.  Restore them if
+	// the local MAME UI or a persisted cfg file tries to change them at runtime.
+	if (!enforce_dip_settings(*m_impl, false))
 		return false;
 	if (m_impl->remote_bootstrap_enabled &&
 			!m_impl->determinism_bootstrap_ready &&
