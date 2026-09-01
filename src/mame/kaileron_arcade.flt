@@ -117,6 +117,8 @@
 "namco/galaga.cpp"
 "namco/mappy.cpp"
 "namco/namcona1.cpp"
+"namco/namconb1.cpp"
+"namco/namcos1.cpp"
 "namco/namcos12.cpp"
 "namco/namcos2.cpp"
 "namco/namcos86.cpp"
