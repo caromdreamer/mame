@@ -83,11 +83,11 @@ constexpr u32 KN_SLOT_SERVICE_MODE = 13;
 constexpr u32 KN_SLOT_SERVICE1 = 14;
 constexpr u32 KN_SLOT_BUTTON_EXTENSION_BASE = 16;
 constexpr u32 KN_SLOT_SERVICE_EXTENSION_BASE = KN_SLOT_BUTTON_EXTENSION_BASE + 9;
-// Player 1 must be able to operate the second cabinet's Coin and Start
-// controls while practising alone. Keep them distinct from the regular
-// per-player bits so Coin 1/Start 1 do not also assert their P2 equivalents.
+// Player 1 may insert the second cabinet's coin while practising alone.
+// Keep this distinct from regular per-player bits so Coin 1 does not also
+// assert Coin 2. P2 Start intentionally remains owned by P2: unlike a coin,
+// it can change the active game's menu and gameplay state.
 constexpr u32 KN_SLOT_OWNER_P2_COIN = KN_SLOT_SERVICE_EXTENSION_BASE + 3;
-constexpr u32 KN_SLOT_OWNER_P2_START = KN_SLOT_SERVICE_EXTENSION_BASE + 4;
 constexpr u32 KN_SLOT_NONE = std::numeric_limits<u32>::max();
 
 enum class socd_mode
@@ -1249,11 +1249,9 @@ static u32 owner_control_slot_for_field(ioport_field &field)
 {
 	// Coin 2 is commonly bound to keyboard 6. Many MAME drivers expose cabinet
 	// controls without PORT_PLAYER(2), so their input type is the reliable
-	// identity. Allow P1 to use P2 Coin and Start while practising alone.
+	// identity. Allow P1 to insert P2 Coin while practising alone.
 	if (field.type() == IPT_COIN2)
 		return KN_SLOT_OWNER_P2_COIN;
-	if (field.type() == IPT_START2)
-		return KN_SLOT_OWNER_P2_START;
 	return KN_SLOT_NONE;
 }
 
