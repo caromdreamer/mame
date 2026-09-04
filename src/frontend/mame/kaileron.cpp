@@ -83,6 +83,12 @@ constexpr u32 KN_SLOT_SERVICE_MODE = 13;
 constexpr u32 KN_SLOT_SERVICE1 = 14;
 constexpr u32 KN_SLOT_BUTTON_EXTENSION_BASE = 16;
 constexpr u32 KN_SLOT_SERVICE_EXTENSION_BASE = KN_SLOT_BUTTON_EXTENSION_BASE + 9;
+// Player 1 must be able to operate the second cabinet's Coin and Start
+// controls while practising alone. Keep them distinct from the regular
+// per-player bits so Coin 1/Start 1 do not also assert their P2 equivalents.
+constexpr u32 KN_SLOT_OWNER_P2_COIN = KN_SLOT_SERVICE_EXTENSION_BASE + 3;
+constexpr u32 KN_SLOT_OWNER_P2_START = KN_SLOT_SERVICE_EXTENSION_BASE + 4;
+constexpr u32 KN_SLOT_NONE = std::numeric_limits<u32>::max();
 
 enum class socd_mode
 {
@@ -374,6 +380,7 @@ struct mapped_input_field
 	u32 byte;
 	u8 bit;
 	bool owner_only;
+	u32 owner_control_slot;
 };
 
 struct chat_overlay_message
@@ -1238,6 +1245,18 @@ static u32 player_for_field(ioport_field &field)
 	return field.player();
 }
 
+static u32 owner_control_slot_for_field(ioport_field &field)
+{
+	// Coin 2 is commonly bound to keyboard 6. Many MAME drivers expose cabinet
+	// controls without PORT_PLAYER(2), so their input type is the reliable
+	// identity. Allow P1 to use P2 Coin and Start while practising alone.
+	if (field.type() == IPT_COIN2)
+		return KN_SLOT_OWNER_P2_COIN;
+	if (field.type() == IPT_START2)
+		return KN_SLOT_OWNER_P2_START;
+	return KN_SLOT_NONE;
+}
+
 static void build_input_map(kaileron_adapter::impl &adapter)
 {
 	if (adapter.input_map_built)
@@ -1253,7 +1272,13 @@ static void build_input_map(kaileron_adapter::impl &adapter)
 				continue;
 			if (field.is_analog())
 				continue;
-			adapter.input_map.push_back(mapped_input_field{&field, player_for_field(field), byte, bit, owner_only_input_field(field)});
+			adapter.input_map.push_back(mapped_input_field{
+					&field,
+					player_for_field(field),
+					byte,
+					bit,
+					owner_only_input_field(field),
+					owner_control_slot_for_field(field)});
 		}
 	}
 
@@ -1282,7 +1307,11 @@ static u32 required_input_size(kaileron_adapter::impl &adapter)
 
 	u32 bytes = 1;
 	for (mapped_input_field const &mapped : adapter.input_map)
+	{
 		bytes = std::max<u32>(bytes, mapped.byte + 1);
+		if (mapped.owner_control_slot != KN_SLOT_NONE)
+			bytes = std::max<u32>(bytes, mapped.owner_control_slot / 8 + 1);
+	}
 	return bytes;
 }
 
@@ -1412,8 +1441,16 @@ static void read_local_input(kaileron_adapter::impl &adapter, u8 *bytes, u32 len
 	{
 		if (mapped.owner_only && adapter.player_id != 0)
 			continue;
-		if ((mapped.owner_only || mapped.player == source_player) && mapped_local_input_pressed(adapter.machine, mapped))
-			set_input_bit(bytes, len, mapped.byte, mapped.bit);
+
+		bool const regular_control = mapped.owner_only || mapped.player == source_player;
+		bool const owner_control = adapter.player_id == 0 && mapped.owner_control_slot != KN_SLOT_NONE;
+		if ((regular_control || owner_control) && mapped_local_input_pressed(adapter.machine, mapped))
+		{
+			if (regular_control)
+				set_input_bit(bytes, len, mapped.byte, mapped.bit);
+			if (owner_control)
+				set_input_slot(bytes, len, mapped.owner_control_slot);
+		}
 	}
 	apply_button_shortcuts(adapter, bytes, len, source_player);
 	apply_socd_cleaning(adapter, bytes, len);
@@ -1675,7 +1712,12 @@ static bool mapped_input_pressed(
 		return player_count > 0 && input_bit_pressed(players[0], mapped);
 	}
 
-	return mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped);
+	if (mapped.player < player_count && input_bit_pressed(players[mapped.player], mapped))
+		return true;
+
+	return mapped.owner_control_slot != KN_SLOT_NONE &&
+			player_count > 0 &&
+			input_slot_pressed(players[0].bytes, players[0].len, mapped.owner_control_slot);
 }
 
 static void apply_mapped_inputs(
