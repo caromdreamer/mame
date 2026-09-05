@@ -1862,6 +1862,27 @@ time_t ioport_manager::initialize()
 	for (auto &port : m_portlist)
 		port.second->init_live_state();
 
+	// Dynamic output fields suppress callbacks when a write repeats the last
+	// observed value.  Their latches therefore affect emulated devices (notably
+	// serial EEPROM clock/data lines), but standard MAME disk states have never
+	// carried them.  Preserve them only in Kaileron transient snapshots so
+	// rollback/runahead restores every device-visible output edge without
+	// invalidating existing .sta files.
+	for (auto &port : m_portlist)
+	{
+		ioport_port_live &live = port.second->live();
+		if (live.writelist.empty())
+			continue;
+
+		machine().save().save_transient_item(
+				&port.second->device(), "transient_ioport", port.second->tag(), 0,
+				live.outputvalue, "outputvalue");
+		for (u32 index = 0; index < live.writelist.size(); index++)
+			machine().save().save_transient_item(
+					&port.second->device(), "transient_ioport", port.second->tag(), index,
+					live.writelist[index].transient_oldval(), "m_oldval");
+	}
+
 	// handle autoselection of devices
 	init_autoselect_devices({ IPT_AD_STICK_X,  IPT_AD_STICK_Y,   IPT_AD_STICK_Z }, OPTION_ADSTICK_DEVICE,    "analog joystick");
 	init_autoselect_devices({ IPT_PADDLE,      IPT_PADDLE_V },                     OPTION_PADDLE_DEVICE,     "paddle");

@@ -130,19 +130,22 @@ void save_manager::allow_registration(bool allowed)
 	m_reg_allowed = allowed;
 	if (!allowed)
 	{
-		// look for duplicates
-		std::sort(m_entry_list.begin(), m_entry_list.end(),
-				[] (std::unique_ptr<state_entry> const& a, std::unique_ptr<state_entry> const& b) { return a->m_name < b->m_name; });
-
 		int dupes_found = 0;
-		for (int i = 1; i < m_entry_list.size(); i++)
+		auto sort_and_find_duplicates = [&dupes_found] (auto &entries)
 		{
-			if (m_entry_list[i - 1]->m_name == m_entry_list[i]->m_name)
+			std::sort(entries.begin(), entries.end(),
+					[] (std::unique_ptr<state_entry> const &a, std::unique_ptr<state_entry> const &b) { return a->m_name < b->m_name; });
+			for (int i = 1; i < entries.size(); i++)
 			{
-				osd_printf_error("Duplicate save state registration entry (%s)\n", m_entry_list[i]->m_name);
-				dupes_found++;
+				if (entries[i - 1]->m_name == entries[i]->m_name)
+				{
+					osd_printf_error("Duplicate save state registration entry (%s)\n", entries[i]->m_name);
+					dupes_found++;
+				}
 			}
-		}
+		};
+		sort_and_find_duplicates(m_entry_list);
+		sort_and_find_duplicates(m_transient_entry_list);
 
 		if (dupes_found)
 			fatalerror("%d duplicate save state entries found.\n", dupes_found);
@@ -225,6 +228,27 @@ void save_manager::register_postload(save_prepost_delegate func)
 
 	// allocate a new entry
 	m_postload_list.push_back(std::make_unique<state_callback>(func));
+}
+
+
+//-------------------------------------------------
+//  indexed_transient_only_item - return a
+//  rollback/runahead-only item with the given index
+//-------------------------------------------------
+
+const char *save_manager::indexed_transient_only_item(int index, void *&base, u32 &valsize, u32 &valcount, u32 &blockcount, u32 &stride) const
+{
+	if (index >= m_transient_entry_list.size() || index < 0)
+		return nullptr;
+
+	state_entry *entry = m_transient_entry_list.at(index).get();
+	base = entry->m_data;
+	valsize = entry->m_typesize;
+	valcount = entry->m_typecount;
+	blockcount = entry->m_blockcount;
+	stride = entry->m_stride;
+
+	return entry->m_name.c_str();
 }
 
 
@@ -650,6 +674,8 @@ size_t save_manager::transient_state_size() const
 	for (auto const &entry : m_entry_list)
 		if (!entry_is_extended(*entry))
 			size += size_t(entry->m_typesize) * entry->m_typecount * entry->m_blockcount;
+	for (auto const &entry : m_transient_entry_list)
+		size += size_t(entry->m_typesize) * entry->m_typecount * entry->m_blockcount;
 	if (!m_reg_allowed)
 		m_transient_state_size_cache = size;
 	return size;
@@ -665,6 +691,16 @@ u32 save_manager::transient_state_signature() const
 	{
 		if (entry_is_extended(*entry))
 			continue;
+		crc.append(entry->m_name.data(), entry->m_name.length());
+		u32 temp[4];
+		temp[0] = little_endianize_int32(entry->m_typesize);
+		temp[1] = little_endianize_int32(entry->m_typecount);
+		temp[2] = little_endianize_int32(entry->m_blockcount);
+		temp[3] = 0;
+		crc.append(&temp[0], sizeof(temp));
+	}
+	for (auto const &entry : m_transient_entry_list)
+	{
 		crc.append(entry->m_name.data(), entry->m_name.length());
 		u32 temp[4];
 		temp[0] = little_endianize_int32(entry->m_typesize);
@@ -715,6 +751,16 @@ save_error save_manager::write_transient_buffer(void *buf, size_t size, u32 sign
 			cursor += block_size;
 		}
 	}
+	for (auto const &entry : m_transient_entry_list)
+	{
+		u32 const block_size = entry->m_typesize * entry->m_typecount;
+		u8 const *data = static_cast<u8 const *>(entry->m_data);
+		for (u32 block = 0; block < entry->m_blockcount; block++, data += entry->m_stride)
+		{
+			std::memcpy(cursor, data, block_size);
+			cursor += block_size;
+		}
+	}
 	return cursor == (static_cast<u8 *>(buf) + size) ? STATERR_NONE : STATERR_WRITE_ERROR;
 }
 
@@ -735,6 +781,18 @@ save_error save_manager::read_transient_buffer(void const *buf, size_t size, u32
 	{
 		if (entry_is_extended(*entry))
 			continue;
+		u32 const block_size = entry->m_typesize * entry->m_typecount;
+		u8 *data = static_cast<u8 *>(entry->m_data);
+		for (u32 block = 0; block < entry->m_blockcount; block++, data += entry->m_stride)
+		{
+			std::memcpy(data, cursor, block_size);
+			cursor += block_size;
+		}
+		if (flip)
+			entry->flip_data();
+	}
+	for (auto const &entry : m_transient_entry_list)
+	{
 		u32 const block_size = entry->m_typesize * entry->m_typecount;
 		u8 *data = static_cast<u8 *>(entry->m_data);
 		for (u32 block = 0; block < entry->m_blockcount; block++, data += entry->m_stride)
@@ -874,6 +932,29 @@ save_error save_manager::write_file(util::core_file &file)
 			return STATERR_WRITE_ERROR;
 	}
 	return writer->finalize() ? STATERR_WRITE_ERROR : STATERR_NONE;
+}
+
+
+//-------------------------------------------------
+//  save_transient_memory - register memory used by
+//  rollback/runahead without changing disk states
+//-------------------------------------------------
+
+void save_manager::save_transient_memory(device_t *device, const char *module, const char *tag, u32 index, const char *name, void *val, u32 valsize, u32 valcount, u32 blockcount, u32 stride)
+{
+	assert(valsize == 1 || valsize == 2 || valsize == 4 || valsize == 8);
+	assert(((blockcount <= 1) && (stride == 0)) || (stride >= valcount));
+
+	if (!m_reg_allowed)
+		fatalerror("Attempt to register transient state entry after state registration is closed!\nModule %s tag %s name %s\n", module, tag, name);
+
+	std::string totalname;
+	if (tag)
+		totalname = string_format("%s/%s/%X/%s", module, tag, index, name);
+	else
+		totalname = string_format("%s/%X/%s", module, index, name);
+
+	m_transient_entry_list.emplace_back(std::make_unique<state_entry>(val, std::move(totalname), device, module, tag ? tag : "", index, valsize, valcount, blockcount, stride));
 }
 
 
@@ -1253,6 +1334,8 @@ void save_manager::dump_registry() const
 {
 	for (auto &entry : m_entry_list)
 		LOG(("%s: %u x %u x %u (%u)\n", entry->m_name.c_str(), entry->m_typesize, entry->m_typecount, entry->m_blockcount, entry->m_stride));
+	for (auto &entry : m_transient_entry_list)
+		LOG(("[transient] %s: %u x %u x %u (%u)\n", entry->m_name.c_str(), entry->m_typesize, entry->m_typecount, entry->m_blockcount, entry->m_stride));
 }
 
 

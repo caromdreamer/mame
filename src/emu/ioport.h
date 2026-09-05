@@ -894,6 +894,7 @@ public:
 	// read/write
 	void read(ioport_value &result);
 	void write(ioport_value newval);
+	ioport_value &transient_oldval() noexcept { return m_oldval; }
 
 private:
 	// internal state

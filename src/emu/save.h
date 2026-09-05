@@ -159,12 +159,14 @@ public:
 	running_machine &machine() const { return m_machine; }
 	rewinder *rewind() { return m_rewind.get(); }
 	int registration_count() const { return m_entry_list.size(); }
+	int transient_only_registration_count() const { return m_transient_entry_list.size(); }
 	bool registration_allowed() const { return m_reg_allowed; }
 	bool supported() const { return m_supported; }
 
 	// registration control
 	void allow_registration(bool allowed = true);
 	const char *indexed_item(int index, void *&base, u32 &valsize, u32 &valcount, u32 &blockcount, u32 &stride) const;
+	const char *indexed_transient_only_item(int index, void *&base, u32 &valsize, u32 &valcount, u32 &blockcount, u32 &stride) const;
 
 	// function registration
 	void register_presave(save_prepost_delegate func);
@@ -191,6 +193,16 @@ public:
 
 	// generic memory registration
 	void save_memory(device_t *device, const char *module, const char *tag, u32 index, const char *name, void *val, u32 valsize, u32 valcount = 1, u32 blockcount = 1, u32 stride = 0);
+	void save_transient_memory(device_t *device, const char *module, const char *tag, u32 index, const char *name, void *val, u32 valsize, u32 valcount = 1, u32 blockcount = 1, u32 stride = 0);
+
+	// State that affects rollback/runahead execution but must not alter the
+	// standard MAME disk save layout or invalidate existing .sta files.
+	template <typename ItemType>
+	std::enable_if_t<is_atom<typename array_unwrap<ItemType>::underlying_type>::value> save_transient_item(device_t *device, const char *module, const char *tag, int index, ItemType &value, const char *valname)
+	{
+		static_assert(!std::is_pointer<ItemType>::value, "Called save_transient_item on a pointer with no count!");
+		save_transient_memory(device, module, tag, index, valname, array_unwrap<ItemType>::ptr(value), array_unwrap<ItemType>::SIZE, array_unwrap<ItemType>::SAVE_COUNT);
+	}
 
 	// templatized wrapper for general objects and arrays
 	template <typename ItemType>
@@ -374,6 +386,7 @@ private:
 	mutable bool              m_transient_state_signature_cached = false;
 
 	std::vector<std::unique_ptr<state_entry>>    m_entry_list;       // list of registered entries
+	std::vector<std::unique_ptr<state_entry>>    m_transient_entry_list; // rollback/runahead-only entries
 	std::vector<std::unique_ptr<ram_state>>      m_ramstate_list;    // list of ram states
 	std::vector<std::unique_ptr<state_callback>> m_presave_list;     // list of pre-save functions
 	std::vector<std::unique_ptr<state_callback>> m_postload_list;    // list of post-load functions

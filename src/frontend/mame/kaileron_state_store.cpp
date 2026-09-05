@@ -65,6 +65,11 @@ void fast_state_hash_append(u64 &hash, u8 const *bytes, std::size_t len)
 bool unstable_state_entry(char const *name)
 {
 	std::string const entry(name ? name : "");
+	auto const ends_with = [&entry] (std::string_view suffix)
+	{
+		return entry.size() >= suffix.size() &&
+				entry.compare(entry.size() - suffix.size(), suffix.size(), suffix) == 0;
+	};
 	// These entries describe host-side scheduling/buffering or Z80 scratch that
 	// is not initialized until a matching instruction executes.  They are part
 	// of a restorable MAME state, but not a stable cross-process world identity.
@@ -85,7 +90,15 @@ bool unstable_state_entry(char const *name)
 			entry.compare(entry.size() - 20, 20, "/m_last_partial_scan") == 0;
 	bool const tilemap_scroll_cache = entry.rfind("tilemap/", 0) == 0 &&
 			((entry.size() >= 12 && entry.compare(entry.size() - 12, 12, "/m_rowscroll") == 0) ||
-			 (entry.size() >= 12 && entry.compare(entry.size() - 12, 12, "/m_colscroll") == 0));
+			 (entry.size() >= 12 && entry.compare(entry.size() - 12, 12, "/m_colscroll") == 0) ||
+			 ends_with("/m_scrollrows") ||
+			 ends_with("/m_scrollcols"));
+	// CPS screen updates derive these traversal cursors from buffered object RAM.
+	// Presentation runahead renders at a different cadence, so they can differ
+	// while producing identical pixels and identical authoritative game state.
+	bool const sprite_traversal_cache =
+			ends_with("/m_last_sprite_offset") ||
+			ends_with("/m_cps2_last_sprite_offset");
 	bool const asynchronous_sound_buffer = entry.rfind("stream.sound_stream", 0) == 0;
 	bool const z80_transient_scratch = entry.size() >= 17 &&
 			entry.compare(entry.size() - 17, 17, "/m_shared_data2.w") == 0;
@@ -94,6 +107,7 @@ bool unstable_state_entry(char const *name)
 			derived_host_output ||
 			screen_partial_update_cursor ||
 			tilemap_scroll_cache ||
+			sprite_traversal_cache ||
 			asynchronous_sound_buffer ||
 			z80_transient_scratch;
 }
@@ -252,6 +266,17 @@ u64 kaileron_state_store::stable_state_hash(std::vector<u8> const &bytes) const
 			return 0;
 		payload_size += size_t(value_size) * value_count * block_count;
 	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_transient_only_item(index, base, value_size, value_count, block_count, stride))
+			return 0;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
 	if (payload_size > bytes.size())
 		return 0;
 
@@ -267,6 +292,25 @@ u64 kaileron_state_store::stable_state_hash(std::vector<u8> const &bytes) const
 		u32 block_count = 0;
 		u32 stride = 0;
 		char const *name = save.indexed_item(index, base, value_size, value_count, block_count, stride);
+		size_t const size = size_t(value_size) * value_count * block_count;
+		if (!name || offset + size > bytes.size())
+			return 0;
+		if (!unstable_state_entry(name))
+		{
+			fast_state_hash_append(hash, reinterpret_cast<u8 const *>(name), std::strlen(name));
+			fast_state_hash_append(hash, bytes.data() + offset, size);
+		}
+		offset += size;
+	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *name = save.indexed_transient_only_item(
+				index, base, value_size, value_count, block_count, stride);
 		size_t const size = size_t(value_size) * value_count * block_count;
 		if (!name || offset + size > bytes.size())
 			return 0;
@@ -438,6 +482,17 @@ bool kaileron_state_store::verify_presentation_restore()
 			return false;
 		payload_size += size_t(value_size) * value_count * block_count;
 	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_transient_only_item(index, base, value_size, value_count, block_count, stride))
+			return false;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
 	if (payload_size > m_presentation_snapshot.size())
 		return false;
 
@@ -474,6 +529,38 @@ bool kaileron_state_store::verify_presentation_restore()
 			if (differences < 16)
 				osd_printf_error(
 						"Kaileron: runahead restore changed state entry=%s size=%u\n",
+						name,
+						u32(size));
+			differences++;
+		}
+	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *name = save.indexed_transient_only_item(
+				index, base, value_size, value_count, block_count, stride);
+		size_t const block_size = size_t(value_size) * value_count;
+		size_t const size = block_size * block_count;
+		if (!name || !base || offset + size > m_presentation_snapshot.size())
+			return false;
+		bool changed = false;
+		u8 const *live = static_cast<u8 const *>(base);
+		for (u32 block = 0; block < block_count; block++)
+		{
+			if (std::memcmp(m_presentation_snapshot.data() + offset, live, block_size) != 0)
+				changed = true;
+			offset += block_size;
+			live += stride;
+		}
+		if (!unstable_state_entry(name) && changed)
+		{
+			if (differences < 16)
+				osd_printf_error(
+						"Kaileron: runahead restore changed transient entry=%s size=%u\n",
 						name,
 						u32(size));
 			differences++;
@@ -622,6 +709,17 @@ bool kaileron_state_store::write_manifest(
 			return false;
 		payload_size += size_t(value_size) * value_count * block_count;
 	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		if (!save.indexed_transient_only_item(index, base, value_size, value_count, block_count, stride))
+			return false;
+		payload_size += size_t(value_size) * value_count * block_count;
+	}
 	if (payload_size > bytes.size())
 		return false;
 
@@ -655,6 +753,32 @@ bool kaileron_state_store::write_manifest(
 		u32 block_count = 0;
 		u32 stride = 0;
 		char const *raw_name = save.indexed_item(
+				index, base, value_size, value_count, block_count, stride);
+		size_t const size = size_t(value_size) * value_count * block_count;
+		if (!raw_name || offset + size > bytes.size())
+			return false;
+
+		std::string name(raw_name);
+		std::replace_if(name.begin(), name.end(), [] (char ch) {
+			return ch == '\t' || ch == '\r' || ch == '\n';
+		}, ' ');
+		u64 hash = 1469598103934665603ULL;
+		fast_state_hash_append(hash, reinterpret_cast<u8 const *>(raw_name), std::strlen(raw_name));
+		fast_state_hash_append(hash, bytes.data() + offset, size);
+		output << name << '\t'
+			   << (unstable_state_entry(raw_name) ? 0 : 1) << '\t'
+			   << size << '\t'
+			   << std::hex << std::setw(16) << std::setfill('0') << hash << std::dec << '\n';
+		offset += size;
+	}
+	for (int index = 0; index < save.transient_only_registration_count(); index++)
+	{
+		void *base = nullptr;
+		u32 value_size = 0;
+		u32 value_count = 0;
+		u32 block_count = 0;
+		u32 stride = 0;
+		char const *raw_name = save.indexed_transient_only_item(
 				index, base, value_size, value_count, block_count, stride);
 		size_t const size = size_t(value_size) * value_count * block_count;
 		if (!raw_name || offset + size > bytes.size())
