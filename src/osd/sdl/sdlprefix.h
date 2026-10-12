@@ -50,7 +50,11 @@
 #if defined(__EMSCRIPTEN__)
 #define SDLMAME_EMSCRIPTEN 1
 #define SDLMAME_NO64BITIO 1
-struct _IO_FILE {};  //_IO_FILE is an opaque type in the emscripten libc which makes clang cranky
+#include <stdio.h>
+#if !defined(__DEFINED_struct__IO_FILE)
+// Older Emscripten libc leaves FILE incomplete. Newer musl defines it itself.
+struct _IO_FILE {};
+#endif
 #endif
 
 #if defined(__ANDROID__)

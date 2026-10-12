@@ -28,6 +28,7 @@
 
 // only for oslog callback
 #include <functional>
+#include <memory>
 
 #ifdef SDLMAME_UNIX
 #if (!defined(SDLMAME_MACOSX)) && (!defined(SDLMAME_EMSCRIPTEN)) && (!defined(SDLMAME_ANDROID))
@@ -69,7 +70,11 @@ extern "C" DECLSPEC void SDLCALL SDL_SetModuleHandle(void *hInst);
 
 int main(int argc, char** argv)
 {
+#if defined(__EMSCRIPTEN__)
+	static std::vector<std::string> args = osd_get_command_line(argc, argv);
+#else
 	std::vector<std::string> args = osd_get_command_line(argc, argv);
+#endif
 	int res = 0;
 
 	// disable I/O buffering
@@ -94,8 +99,15 @@ int main(int argc, char** argv)
 #endif
 
 	{
+#if defined(__EMSCRIPTEN__)
+		static auto web_options = std::make_unique<sdl_options>();
+		static auto web_osd = std::make_unique<sdl_osd_interface>(*web_options);
+		sdl_options &options = *web_options;
+		sdl_osd_interface &osd = *web_osd;
+#else
 		sdl_options options;
 		sdl_osd_interface osd(options);
+#endif
 		osd.register_options();
 		res = emulator_info::start_frontend(options, osd, args);
 	}

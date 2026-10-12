@@ -16,7 +16,10 @@
 #include "uiinput.h"
 #include "ui/uimain.h"
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+// The web build links the Rust SDK into the same WASM as MAME.
+#include <emscripten.h>
+#elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -38,6 +41,9 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#if defined(__EMSCRIPTEN__)
+#include <map>
+#endif
 #include <sstream>
 #include <string>
 #include <thread>
@@ -52,6 +58,10 @@ std::string g_kn_mame_scoreboard_overlay;
 bool g_kn_mame_chat_active = false;
 std::u32string g_kn_mame_chat_pending_chars;
 
+#if defined(__EMSCRIPTEN__)
+static kaileron_adapter *s_web_adapter = nullptr;
+#endif
+
 namespace {
 
 using kn_config_init_fn = KnResult (*)(KnConfig *);
@@ -64,7 +74,9 @@ using kn_host_session_get_metrics_fn = KnResult (*)(KnHostSession *, KnMetrics *
 using kn_host_session_get_playback_status_fn = KnResult (*)(KnHostSession *, KnPlaybackStatus *);
 using kn_host_session_leave_fn = void (*)(KnHostSession *);
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+using sdk_library_handle = void *;
+#elif defined(_WIN32)
 using sdk_library_handle = HMODULE;
 #else
 using sdk_library_handle = void *;
@@ -322,7 +334,9 @@ static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
 
 const char *default_sdk_library_path()
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return "statically linked Kaileron SDK";
+#elif defined(_WIN32)
 	return "kaileron.dll";
 #elif defined(__APPLE__)
 	return "target/debug/libkaileron.dylib";
@@ -333,7 +347,9 @@ const char *default_sdk_library_path()
 
 sdk_library_handle open_sdk_library(const char *path, std::string &error)
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return nullptr; // initialize() uses direct SDK symbols in the web build.
+#elif defined(_WIN32)
 	sdk_library_handle library = LoadLibraryA(path);
 	if (!library)
 		error = "Windows error " + std::to_string(GetLastError());
@@ -350,7 +366,9 @@ void close_sdk_library(sdk_library_handle library)
 {
 	if (!library)
 		return;
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return;
+#elif defined(_WIN32)
 	FreeLibrary(library);
 #else
 	dlclose(library);
@@ -360,7 +378,9 @@ void close_sdk_library(sdk_library_handle library)
 template <typename T>
 bool load_symbol(sdk_library_handle library, const char *name, T &out)
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return false; // No platform DLL loader in the statically linked web build.
+#elif defined(_WIN32)
 	out = reinterpret_cast<T>(GetProcAddress(library, name));
 #else
 	out = reinterpret_cast<T>(dlsym(library, name));
@@ -564,6 +584,10 @@ struct kaileron_adapter::impl
 	bool remote_bootstrap_enabled = false;
 	bool determinism_bootstrap_ready = false;
 	std::array<bool, 3> determinism_checkpoints_written = {false, false, false};
+#if defined(__EMSCRIPTEN__)
+	std::map<u32, std::vector<std::vector<u8>>> web_inputs;
+	std::string web_status;
+#endif
 };
 
 constexpr u32 INPUT_OVERLAY_ROWS = 13;
@@ -1921,6 +1945,15 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 
 	if (adapter->trace && adapter->state_store.load_count() > 0)
 		osd_printf_info("Kaileron trace: advance_frame frame=%u before mame_frames=%u loads=%u\n", frame, adapter->frame_runner.completed_frame_count(), adapter->state_store.load_count());
+#if defined(__EMSCRIPTEN__)
+	// Keep a bounded input history for the local late-input validation control.
+	std::vector<std::vector<u8>> web_inputs;
+	for (u32 player = 0; player < player_count; player++)
+		web_inputs.emplace_back(players[player].bytes, players[player].bytes + players[player].len);
+	adapter->web_inputs[frame] = std::move(web_inputs);
+	while (adapter->web_inputs.size() > adapter->state_store.slot_capacity())
+		adapter->web_inputs.erase(adapter->web_inputs.begin());
+#endif
 	if (adapter->show_input_overlay)
 		record_input_history(*adapter, frame, players, player_count);
 
@@ -2450,6 +2483,10 @@ kaileron_adapter::kaileron_adapter(running_machine &machine) :
 
 kaileron_adapter::~kaileron_adapter()
 {
+#if defined(__EMSCRIPTEN__)
+	if (s_web_adapter == this)
+		s_web_adapter = nullptr;
+#endif
 	on_exit();
 	if (m_impl->session && m_impl->kn_host_session_destroy)
 		m_impl->kn_host_session_destroy(m_impl->session);
@@ -2464,6 +2501,17 @@ bool kaileron_adapter::initialize()
 {
 	const char *library_path = env_value("KN_SDK_LIB", default_sdk_library_path());
 	show_kaileron_status(m_impl->machine, std::string("Kaileron: loading SDK ") + library_path);
+#if defined(__EMSCRIPTEN__)
+	m_impl->kn_config_init = &kn_config_init;
+	m_impl->kn_callbacks_init = &kn_callbacks_init;
+	m_impl->kn_playback_status_init = &kn_playback_status_init;
+	m_impl->kn_host_session_create = &kn_host_session_create;
+	m_impl->kn_host_session_destroy = &kn_host_session_destroy;
+	m_impl->kn_host_session_tick = &kn_host_session_tick;
+	m_impl->kn_host_session_get_metrics = &kn_host_session_get_metrics;
+	m_impl->kn_host_session_get_playback_status = &kn_host_session_get_playback_status;
+	m_impl->kn_host_session_leave = &kn_host_session_leave;
+#else
 	std::string load_error;
 	m_impl->library = open_sdk_library(library_path, load_error);
 	if (!m_impl->library)
@@ -2487,6 +2535,7 @@ bool kaileron_adapter::initialize()
 		show_kaileron_status(m_impl->machine, "Kaileron: SDK symbol load failed");
 		return false;
 	}
+#endif
 	show_kaileron_status(m_impl->machine, "Kaileron: SDK symbols loaded");
 
 	const char *server = env_value("KN_SERVER", "");
@@ -2645,6 +2694,9 @@ bool kaileron_adapter::initialize()
 	}
 
 	m_impl->initialized = true;
+#if defined(__EMSCRIPTEN__)
+	s_web_adapter = this;
+#endif
 	osd_printf_info(
 			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u runahead=%u sdk=%s\n",
 			server[0] ? server : "(local)",
@@ -2676,7 +2728,9 @@ bool kaileron_adapter::tick()
 	switch (prepare_determinism_bootstrap(*m_impl))
 	{
 	case determinism_bootstrap_result::waiting:
+#if !defined(__EMSCRIPTEN__)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
 		return true;
 	case determinism_bootstrap_result::failed:
 		osd_printf_error(
@@ -2774,7 +2828,9 @@ bool kaileron_adapter::tick()
 		{
 			m_impl->pace_sleep_count++;
 			m_impl->pace_sleep_time_us += m_impl->sdk_pace_delay_us;
+#if !defined(__EMSCRIPTEN__)
 			std::this_thread::sleep_for(std::chrono::microseconds(m_impl->sdk_pace_delay_us));
+#endif
 		}
 	}
 	return true;
@@ -2858,3 +2914,62 @@ void kaileron_adapter::on_exit()
 				metrics.confirmed_nack_sent);
 	}
 }
+
+#if defined(__EMSCRIPTEN__)
+const char *kaileron_adapter::web_metrics()
+{
+	KnMetrics metrics = {};
+	if (!m_impl->session || m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)
+		return "{\"ready\":false}";
+	std::ostringstream status;
+	status << "{\"ready\":true,\"frame\":" << metrics.current_frame
+			<< ",\"rollbacks\":" << metrics.rollback_count
+			<< ",\"max_rollback\":" << metrics.max_rollback_frames
+			<< ",\"replayed_frames\":" << m_impl->frame_runner.rollback_resimulation_count()
+			<< ",\"loads\":" << m_impl->state_store.load_count()
+			<< ",\"snapshot_bytes\":" << m_impl->state_store.last_snapshot_size()
+			<< ",\"snapshot_slots\":" << m_impl->state_store.valid_slot_count()
+			<< ",\"save_avg_us\":" << m_impl->state_store.average_save_us()
+			<< ",\"load_avg_us\":" << m_impl->state_store.average_load_us()
+			<< ",\"advance_avg_us\":" << m_impl->frame_runner.average_advance_us()
+			<< ",\"state_hash\":\"" << std::hex << metrics.current_state_hash << "\"}";
+	m_impl->web_status = status.str();
+	return m_impl->web_status.c_str();
+}
+
+int kaileron_adapter::web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
+{
+	// This diagnostic is only valid for the offline prototype, on the game thread.
+	if (!m_impl->session || m_impl->networked || !xor_mask || xor_mask > 255)
+		return KN_ERR_INVALID_ARGUMENT;
+	KnMetrics metrics = {};
+	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK ||
+			frame >= metrics.current_frame)
+		return KN_ERR_INVALID_ARGUMENT;
+	auto const found = m_impl->web_inputs.find(frame);
+	if (found == m_impl->web_inputs.end() || player >= found->second.size() ||
+			byte >= found->second[player].size())
+		return KN_ERR_INVALID_ARGUMENT;
+	auto inputs = found->second;
+	inputs[player][byte] ^= u8(xor_mask);
+	std::vector<KnInput> ffi_inputs;
+	for (auto const &input : inputs)
+		ffi_inputs.push_back({input.data(), u32(input.size())});
+	int const result = kn_host_session_apply_confirmed_frame(
+			m_impl->session, frame, ffi_inputs.data(), u32(ffi_inputs.size()));
+	m_impl->rollback_replay_active = false;
+	return result;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
+{
+	return s_web_adapter ? s_web_adapter->web_metrics() : "{\"ready\":false}";
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
+{
+	return s_web_adapter
+			? s_web_adapter->web_correct_input(frame, player, byte, xor_mask)
+			: KN_ERR_INVALID_ARGUMENT;
+}
+#endif

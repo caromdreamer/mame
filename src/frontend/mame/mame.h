@@ -95,6 +95,11 @@ private:
 	std::unique_ptr<inifile_manager>   m_inifile;           // internal data from inifile.c for INIs
 	std::unique_ptr<favorite_manager>  m_favorite;          // internal data from inifile.c for favorites
 	std::unique_ptr<kaileron_adapter> m_kaileron; // Kaileron rollback adapter
+#if defined(__EMSCRIPTEN__)
+	// Browser callbacks outlive execute()'s original C++ stack frames.
+	std::unique_ptr<machine_config> m_web_config;
+	std::unique_ptr<running_machine> m_web_machine;
+#endif
 
 	static mame_machine_manager *s_manager;
 };

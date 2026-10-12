@@ -39,6 +39,7 @@
 #include <rapidjson/stringbuffer.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 #if defined(__EMSCRIPTEN__)
@@ -1385,6 +1386,16 @@ void running_machine::emscripten_main_loop()
 	// execute CPUs if not paused
 	if (!machine->m_paused)
 	{
+		if (machine->manager().kaileron_tick(*machine))
+		{
+			// The SDK owns frame advancement, including rollback and resimulation.
+			// Return to the browser event loop even when prediction is stalled.
+			if (machine->m_saveload_schedule != saveload_schedule::NONE)
+				machine->handle_saveload();
+			if (machine->exit_pending())
+				emscripten_cancel_main_loop();
+			return;
+		}
 		device_scheduler * scheduler;
 		scheduler = &(machine->scheduler());
 
@@ -1421,7 +1432,11 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	EM_ASM (
 		JSMESS.running = true;
 	);
-	emscripten_set_main_loop(&(emscripten_main_loop), 0, 1);
+	// The local Kaileron prototype advances one frame per callback. Do not tie
+	// its game speed to a 120/144/240 Hz display's requestAnimationFrame rate.
+	char const *kn_mame = std::getenv("KN_MAME");
+	int const loop_rate = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0") ? 60 : 0;
+	emscripten_set_main_loop(&(emscripten_main_loop), loop_rate, 1);
 }
 
 running_machine * running_machine::emscripten_get_running_machine()
