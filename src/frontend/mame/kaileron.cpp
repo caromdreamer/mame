@@ -2967,6 +2967,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
 	return s_web_adapter ? s_web_adapter->web_metrics() : "{\"ready\":false}";
 }
 
+int kaileron_adapter::web_dump_snapshot(u32 frame)
+{
+	u64 hash = 0;
+	return m_impl->state_store.export_snapshot(frame, "/state/web-snapshot.bin", hash) &&
+			m_impl->state_store.write_snapshot_manifest(frame, "/state/web-snapshot.tsv") ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_dump_snapshot(u32 frame)
+{
+	return s_web_adapter ? s_web_adapter->web_dump_snapshot(frame) : 0;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
 {
 	return s_web_adapter

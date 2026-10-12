@@ -137,9 +137,11 @@ end
 			_MAKE.esc(_OPTIONS["KAILERON_SDK_ARCHIVE"]),
 			"-s ERROR_ON_UNDEFINED_SYMBOLS=1",
 			"--profiling-funcs",
+			"--js-library " .. _MAKE.esc(MAME_DIR .. "../../web/prototype/transport-library.js"),
 		}
 		dependency {
 			{ "$(TARGET)", _OPTIONS["KAILERON_SDK_ARCHIVE"], true },
+			{ "$(TARGET)", MAME_DIR .. "../../web/prototype/transport-library.js", true },
 		}
 	end
 	links {
