@@ -2932,6 +2932,7 @@ const char *kaileron_adapter::web_metrics()
 			<< ",\"save_avg_us\":" << m_impl->state_store.average_save_us()
 			<< ",\"load_avg_us\":" << m_impl->state_store.average_load_us()
 			<< ",\"advance_avg_us\":" << m_impl->frame_runner.average_advance_us()
+			<< ",\"target_fps\":" << (frame_duration_us(m_impl->machine) ? 1000000.0 / frame_duration_us(m_impl->machine) : 60.0)
 			<< ",\"state_hash\":\"" << std::hex << metrics.current_state_hash << "\"}";
 	m_impl->web_status = status.str();
 	return m_impl->web_status.c_str();

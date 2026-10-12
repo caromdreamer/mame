@@ -44,6 +44,8 @@
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
+#include "kaileron_web_pacing.h"
+#include "screen.h"
 #endif
 
 
@@ -1376,6 +1378,7 @@ void system_time::full_time::set(struct tm &t)
 #if defined(__EMSCRIPTEN__)
 
 running_machine * running_machine::emscripten_running_machine;
+static kaileron_web_pacer web_pacer;
 
 void running_machine::emscripten_main_loop()
 {
@@ -1432,11 +1435,29 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	EM_ASM (
 		JSMESS.running = true;
 	);
-	// The local Kaileron prototype advances one frame per callback. Do not tie
-	// its game speed to a 120/144/240 Hz display's requestAnimationFrame rate.
+	// Present on browser animation frames while advancing at the game's rate.
+	// High-refresh displays must not accelerate emulation.
 	char const *kn_mame = std::getenv("KN_MAME");
-	int const loop_rate = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0") ? 60 : 0;
-	emscripten_set_main_loop(&(emscripten_main_loop), loop_rate, 1);
+	bool const web_kaileron_active = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0");
+	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
+	web_pacer.configure(screen ? screen->frame_period().as_double() * 1000.0 : 1000.0 / 60.0);
+	if (web_kaileron_active)
+	{
+		emscripten_set_main_loop([] {
+			running_machine *machine = emscripten_running_machine;
+			if (machine->m_paused)
+			{
+				web_pacer.reset();
+				emscripten_main_loop();
+				return;
+			}
+			unsigned const steps = web_pacer.steps(emscripten_get_now());
+			for (unsigned step = 0; step < steps && !machine->exit_pending() && !machine->m_paused; ++step)
+				emscripten_main_loop();
+		}, 0, 1);
+	}
+	else
+		emscripten_set_main_loop(&(emscripten_main_loop), 0, 1);
 }
 
 running_machine * running_machine::emscripten_get_running_machine()
