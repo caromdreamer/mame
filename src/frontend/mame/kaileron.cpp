@@ -1884,11 +1884,23 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	out_input->len = std::min<u32>(out_input->cap, adapter->input_size);
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
+#if defined(__EMSCRIPTEN__)
+		// Drain browser transitions at the actual SDK sampling boundary, including
+		// multiple samples in one catch-up tick. A short down/up must be visible to
+		// one sample before its release is delivered to SDL.
+		if (adapter->initialized)
+			EM_ASM({ if (Module.knBrowserBeforeInput) Module.knBrowserBeforeInput(); });
+		adapter->machine.osd().input_update(false);
+#endif
 		read_local_input(*adapter, out_input->bytes, out_input->len);
 		apply_native_autofire(*adapter, out_input->bytes, out_input->len, input_frame);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
 			osd_printf_info("Kaileron trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
+#if defined(__EMSCRIPTEN__)
+		if (adapter->initialized)
+			EM_ASM({ if (Module.knBrowserInputSampled) Module.knBrowserInputSampled($0, $1, $2); }, input_frame, out_input->bytes, out_input->len);
+#endif
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
 	{
@@ -3006,6 +3018,17 @@ int kaileron_adapter::web_correct_input(u32 frame, u32 player, u32 byte, u32 xor
 extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
 {
 	return s_web_adapter ? s_web_adapter->web_metrics() : "{\"ready\":false}";
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_input_bridge_version()
+{
+	return 1;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_ui_menu_active()
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	return machine && machine->ui().is_menu_active() ? 1 : 0;
 }
 
 int kaileron_adapter::web_dump_snapshot(u32 frame)

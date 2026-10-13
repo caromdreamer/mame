@@ -1456,14 +1456,15 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 			var original = MainLoop.requestAnimationFrame;
 			var pending = null;
 			var url = URL.createObjectURL(new Blob([
-				"var requested=false;onmessage=function(){requested=true;};setInterval(function(){if(requested){requested=false;postMessage(0);}},8);"
+				"var timer=null;onmessage=function(event){if(timer!==null)return;var delay=Math.max(0,Math.min(1000,Number(event.data)||0));timer=setTimeout(function(){timer=null;postMessage(0);},delay);};"
 			], {type: 'application/javascript'}));
 			try {
 				var clock = new Worker(url);
 				Module['knWebClock'] = 'worker';
+				Module['knWebNextDelayMs'] = 0;
 				MainLoop.requestAnimationFrame = function(callback) {
 					pending = callback;
-					clock.postMessage(0);
+					clock.postMessage(Module['knWebNextDelayMs']);
 				};
 				clock.onmessage = function() {
 					var callback = pending;
@@ -1493,6 +1494,12 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 			{
 				web_pacer.reset();
 				emscripten_main_loop();
+				EM_ASM({
+					var paused = !!$1;
+					if (paused && !Module.knBrowserInputPaused && Module.knBrowserCancelInput) Module.knBrowserCancelInput();
+					Module.knBrowserInputPaused = paused;
+					Module.knWebNextDelayMs = $0;
+				}, web_frame_period_ms, machine->m_paused ? 1 : 0);
 				return;
 			}
 			u32 const speed = kn_web_playback_speed_percent();
@@ -1501,9 +1508,21 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 				web_playback_speed_percent = speed;
 				web_pacer.configure(web_frame_period_ms * 100.0 / speed);
 			}
-			unsigned const steps = web_pacer.steps(emscripten_get_now());
-			for (unsigned step = 0; step < steps && !machine->exit_pending() && !machine->m_paused; ++step)
+			double const start_ms = emscripten_get_now();
+			unsigned const steps = web_pacer.steps(start_ms);
+			unsigned completed_steps = 0;
+			for (; completed_steps < steps && !machine->exit_pending() && !machine->m_paused; ++completed_steps)
 				emscripten_main_loop();
+			double const end_ms = emscripten_get_now();
+			// Wake at the pacer's deadline, accounting for emulation work, rather
+			// than quantizing every frame to an unrelated 8 ms polling interval.
+			EM_ASM({
+				var paused = !!$4;
+				if (paused && !Module.knBrowserInputPaused && Module.knBrowserCancelInput) Module.knBrowserCancelInput();
+				Module.knBrowserInputPaused = paused;
+				Module.knWebNextDelayMs = $0;
+				if (Module.knBrowserFrameTiming) Module.knBrowserFrameTiming($1, $2, $3);
+			}, web_pacer.next_delay_ms(end_ms), start_ms, end_ms - start_ms, completed_steps, machine->m_paused ? 1 : 0);
 		}, 0, 1);
 	}
 	else

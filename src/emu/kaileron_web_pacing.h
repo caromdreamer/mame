@@ -4,6 +4,7 @@
 #define MAME_EMU_KAILERON_WEB_PACING_H
 
 #include <cmath>
+#include <algorithm>
 
 class kaileron_web_pacer
 {
@@ -17,6 +18,13 @@ public:
 	}
 
 	void reset() { m_started = false; }
+
+	double next_delay_ms(double now_ms) const
+	{
+		if (!m_started || !std::isfinite(now_ms) || now_ms < m_last_ms)
+			return 0;
+		return std::max(0.0, m_deadline_ms - now_ms);
+	}
 
 	unsigned steps(double now_ms)
 	{
