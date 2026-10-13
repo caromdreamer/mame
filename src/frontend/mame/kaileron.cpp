@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -2780,6 +2781,9 @@ bool kaileron_adapter::tick()
 	else if (result != KN_OK)
 	{
 		osd_printf_error("Kaileron: tick failed result=%d\n", int(result));
+#if defined(__EMSCRIPTEN__)
+		EM_ASM({if(Module.knBrowserSessionError)Module.knBrowserSessionError($0);}, int(result));
+#endif
 		m_impl->machine.schedule_exit();
 	}
 	else
@@ -2957,6 +2961,7 @@ const char *kaileron_adapter::web_metrics()
 			<< ",\"input_delay_frames\":" << metrics.input_delay_frames
 			<< ",\"confirmed_frames\":" << metrics.confirmed_frame_count
 			<< ",\"prediction_stalls\":" << metrics.prediction_stall_frames
+			<< ",\"disconnected_mask\":" << metrics.disconnected_mask
 			<< ",\"local_input\":" << unsigned(m_impl->last_local_input)
 			<< ",\"rollbacks\":" << metrics.rollback_count
 			<< ",\"max_rollback\":" << metrics.max_rollback_frames
@@ -3022,13 +3027,55 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_input_bridge_version()
 {
-	return 1;
+	return 2;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_ui_menu_active()
 {
 	running_machine *machine = running_machine::emscripten_get_running_machine();
 	return machine && machine->ui().is_menu_active() ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_set_presentation(double gain, double gamma)
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	if (!machine || !std::isfinite(gain) || !std::isfinite(gamma) || gain < 0 || gain > 4 || gamma < 0.1 || gamma > 3) return 0;
+	machine->sound().set_master_gain(float(gain));
+	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
+	if (screen) {
+		auto settings = screen->container().get_user_settings();
+		settings.m_gamma = float(gamma);
+		screen->container().set_user_settings(settings);
+	}
+	return 1;
+}
+
+int kaileron_adapter::web_set_runahead(u32 frames)
+{
+	if (frames > 8 || m_impl->spectator || env_enabled("KN_REPLAY_PLAYBACK")) return 0;
+	m_impl->requested_runahead_frames = frames;
+	m_impl->runahead_frames = frames;
+	return 1;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_set_runahead(u32 frames)
+{
+	return s_web_adapter ? s_web_adapter->web_set_runahead(frames) : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_stop()
+{
+	emscripten_cancel_main_loop();
+}
+
+int kaileron_adapter::web_snapshot_manifest(u32 frame)
+{
+	return m_impl->state_store.write_snapshot_manifest(frame, "/state/web-snapshot.tsv") ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_snapshot_manifest(u32 frame)
+{
+	return s_web_adapter ? s_web_adapter->web_snapshot_manifest(frame) : 0;
 }
 
 int kaileron_adapter::web_dump_snapshot(u32 frame)

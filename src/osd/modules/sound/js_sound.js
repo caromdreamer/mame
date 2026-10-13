@@ -21,16 +21,21 @@ var start = 0;
 var rear = 0;
 var watchDogDateLast = null;
 var watchDogTimerEvent = null;
+var blockSize = 1024;
+var underruns = 0;
+var trimmedFrames = 0;
+var initializationFailed = false;
 
 function lazy_init () {
 	//Make
-	if (context) {
+	if (context || initializationFailed) {
 		//Return if already created:
 		return;
 	}
+	try {
 	if (typeof AudioContext != "undefined") {
 		//Standard context creation:
-		context = new AudioContext();
+		context = new AudioContext({sampleRate:48000,latencyHint:'interactive'});
 	}
 	else if (typeof webkitAudioContext != "undefined") {
 		//Older webkit context creation:
@@ -38,6 +43,7 @@ function lazy_init () {
 	}
 	else {
 		//API not found!
+		initializationFailed = true;
 		return;
 	}
 	//Generate a volume control node:
@@ -48,17 +54,22 @@ function lazy_init () {
 	gain_node.connect(context.destination);
 	//Initialize the streaming event:
 	init_event();
+	} catch (error) {
+		if (eventNode) {eventNode.onaudioprocess=null;eventNode.disconnect();eventNode=null;}
+		if (context && context.close) context.close().catch(function(){});
+		context=null;initializationFailed=true;
+	}
 };
 
 function init_event() {
 	//Generate a streaming node point:
 	if (typeof context.createScriptProcessor == "function") {
 		//Current standard compliant way:
-		eventNode = context.createScriptProcessor(4096, 0, 2);
+		eventNode = context.createScriptProcessor(blockSize, 0, 2);
 	}
 	else {
 		//Deprecated way:
-		eventNode = context.createJavaScriptNode(4096, 0, 2);
+		eventNode = context.createJavaScriptNode(blockSize, 0, 2);
 	}
 	//Make our tick function the audio callback function:
 	eventNode.onaudioprocess = tick;
@@ -73,17 +84,12 @@ function initializeWatchDog() {
 	if (watchDogTimerEvent === null) {
 		watchDogTimerEvent = setInterval(function () {
 			var timeDiff = (new Date()).getTime() - watchDogDateLast;
-			if (timeDiff > 500) {
+			if (timeDiff > 500 && context && context.state === 'running' && !document.hidden) {
 				//WORKAROUND FOR FIREFOX BUG:
 				//TODO: decide if we want to user agent sniff Firefox here,
 				//since Google Chrome doesn't need this:
 				disconnect_old_event();
 				init_event();
-
-				//Work around autoplay restrictions in Chrome 71+ https://developers.google.com/web/updates/2017/09/autoplay-policy-changes#webaudio
-				if (context) {
-					context.resume();
-				}
 			}
 		}, 500);
 	}
@@ -136,6 +142,13 @@ function stream_sink_update (
 			}
 		}
 	}
+	// Catch-up/suspension must not build a half-second tail of stale audio.
+	var queued = sample_count();
+	var maximum = blockSize * 8;
+	if (queued > maximum) {
+		trimmedFrames += (queued - maximum) / 2;
+		start = (rear - maximum + bufferSize) % bufferSize;
+	}
 };
 
 function tick (event) {
@@ -144,19 +157,17 @@ function tick (event) {
 		buffers[bufferCount] = event.outputBuffer.getChannelData(bufferCount);
 	}
 	//Copy samples from the input buffer to the Web Audio API:
-	for (var index = 0; index < 4096 && start != rear; ++index) {
+	for (var index = 0; index < buffers[0].length && start != rear; ++index) {
 		buffers[0][index] = inputBuffer[start++];
 		buffers[1][index] = inputBuffer[start++];
 		if (start == bufferSize) {
 			start = 0;
 		}
 	}
-	//Pad with latest if we're underrunning:
-	var idx = (index == 0 ? bufferSize : index) - 1;
-	while (index < 4096) {
-		buffers[0][index] = buffers[0][idx];
-		buffers[1][index++] = buffers[1][idx];
-	}
+	if (index < buffers[0].length) underruns++;
+	// Silence is finite even when no sample was produced. The old empty-buffer
+	// path read outside the output array and generated NaNs.
+	while (index < buffers[0].length) {buffers[0][index] = 0;buffers[1][index++] = 0;}
 	//Deep inside the bowels of vendors bugs,
 	//we're using watchdog for a firefox bug,
 	//where the user agent decides to stop firing events
@@ -187,10 +198,20 @@ function sample_count() {
 return {
 	stream_sink_update: stream_sink_update,
 	get_context: get_context,
-	sample_count: sample_count
+	sample_count: sample_count,
+	clear: function(){start=rear;},
+	stats: function(){return {version:2,state:context?context.state:'unavailable',bufferMs:context?Math.max(0,sample_count())*500/context.sampleRate:0,blockSize:blockSize,underruns:underruns,trimmedFrames:trimmedFrames};},
+	resume: function(){
+		if (!context || context.state === 'closed') {context=null;initializationFailed=false;start=rear;lazy_init();}
+		return context?context.resume():Promise.reject(new Error('게임 오디오 장치를 사용할 수 없습니다.'));
+	}
 };
 
 })();
 
 window.jsmame_stream_sink_update = jsmame_web_audio.stream_sink_update;
 window.jsmame_sample_count = jsmame_web_audio.sample_count;
+window.jsmame_audio_status = jsmame_web_audio.stats;
+window.jsmame_audio_clear = jsmame_web_audio.clear;
+window.jsmame_audio_resume = jsmame_web_audio.resume;
+window.jsmame_audio_suspend = function(){jsmame_web_audio.clear();var context=jsmame_web_audio.get_context();return context?context.suspend():Promise.resolve();};

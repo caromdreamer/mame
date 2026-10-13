@@ -29,6 +29,8 @@ public:
 	u32 web_playback_speed_percent() const;
 	int web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask);
 	int web_dump_snapshot(u32 frame);
+	int web_snapshot_manifest(u32 frame);
+	int web_set_runahead(u32 frames);
 #endif
 
 public:
