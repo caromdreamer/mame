@@ -19,6 +19,7 @@
 #if defined(__EMSCRIPTEN__)
 // The web build links the Rust SDK into the same WASM as MAME.
 #include <emscripten.h>
+#include "render.h"
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -2928,7 +2929,11 @@ const char *kaileron_adapter::web_metrics()
 	if (!m_impl->session || m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)
 		return "{\"ready\":false}";
 	std::ostringstream status;
+	screen_device *screen = screen_device_enumerator(m_impl->machine.root_device()).first();
 	status << "{\"ready\":true,\"frame\":" << metrics.current_frame
+			<< ",\"ui_menu_active\":" << (m_impl->machine.ui().is_menu_active() ? "true" : "false")
+			<< ",\"master_gain\":" << m_impl->machine.sound().master_gain()
+			<< ",\"screen_gamma\":" << (screen ? screen->container().get_user_settings().m_gamma : 1.0F)
 			<< ",\"input_delay_frames\":" << metrics.input_delay_frames
 			<< ",\"confirmed_frames\":" << metrics.confirmed_frame_count
 			<< ",\"prediction_stalls\":" << metrics.prediction_stall_frames

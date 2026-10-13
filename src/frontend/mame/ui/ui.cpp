@@ -1050,7 +1050,11 @@ bool mame_ui_manager::update_and_render(render_target &target)
 	};
 	if (!g_kn_mame_scoreboard_overlay.empty())
 		draw_kaileron_overlay_text(g_kn_mame_scoreboard_overlay, 0.08F, 0.02F, 0.84F, ui::text_layout::text_justify::CENTER, 1.85F);
-	if (!g_kn_mame_chat_overlay.empty())
+	if (!g_kn_mame_chat_overlay.empty()
+#if defined(__EMSCRIPTEN__)
+			&& !std::getenv("KN_MAME_BROWSER_CHAT_OVERLAY")
+#endif
+			)
 		draw_kaileron_overlay_text(g_kn_mame_chat_overlay, 0.04F, 0.12F, 0.92F, ui::text_layout::text_justify::LEFT, 1.6F);
 	if (!g_kn_mame_chat_input_overlay.empty())
 		draw_kaileron_overlay_text(g_kn_mame_chat_input_overlay, 0.04F, 0.88F, 0.92F, ui::text_layout::text_justify::LEFT, 1.95F);
