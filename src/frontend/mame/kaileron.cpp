@@ -2749,6 +2749,12 @@ bool kaileron_adapter::tick()
 	m_impl->rollback_replay_active = false;
 	m_impl->presentation_ready = false;
 	m_impl->sdk_pace_delay_us = 0;
+#if defined(__EMSCRIPTEN__)
+	// Browser key events enqueue SDL input between animation callbacks.
+	// Refresh physical host input before the SDK samples this frame, instead
+	// of waiting for the video update after an emulated frame has advanced.
+	m_impl->machine.osd().input_update(false);
+#endif
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
 	m_impl->rollback_replay_active = false;
 	if (result == KN_ERR_REPLAY_COMPLETE)
@@ -2923,6 +2929,10 @@ const char *kaileron_adapter::web_metrics()
 		return "{\"ready\":false}";
 	std::ostringstream status;
 	status << "{\"ready\":true,\"frame\":" << metrics.current_frame
+			<< ",\"input_delay_frames\":" << metrics.input_delay_frames
+			<< ",\"confirmed_frames\":" << metrics.confirmed_frame_count
+			<< ",\"prediction_stalls\":" << metrics.prediction_stall_frames
+			<< ",\"local_input\":" << unsigned(m_impl->last_local_input)
 			<< ",\"rollbacks\":" << metrics.rollback_count
 			<< ",\"max_rollback\":" << metrics.max_rollback_frames
 			<< ",\"replayed_frames\":" << m_impl->frame_runner.rollback_resimulation_count()
