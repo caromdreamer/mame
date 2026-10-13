@@ -1438,8 +1438,7 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	EM_ASM (
 		JSMESS.running = true;
 	);
-	// Present on browser animation frames while advancing at the game's rate.
-	// High-refresh displays must not accelerate emulation.
+	// Advance at the game's rate independently of display refresh and visibility.
 	char const *kn_mame = std::getenv("KN_MAME");
 	bool const web_kaileron_active = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0");
 	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
@@ -1448,6 +1447,46 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	web_pacer.configure(web_frame_period_ms);
 	if (web_kaileron_active)
 	{
+		// A hidden player's stopped rAF loop also stalls the visible peer at the
+		// prediction limit. A dedicated clock supplies event-loop wakeups only;
+		// MAME/SDK remain on this thread, and the pacer still owns frame timing.
+		// Keep at most one requested wakeup so a suspended page cannot flood the
+		// event queue when it resumes. Page freezing/discarding is not preventable.
+		EM_ASM({
+			var original = MainLoop.requestAnimationFrame;
+			var pending = null;
+			var url = URL.createObjectURL(new Blob([
+				"var requested=false;onmessage=function(){requested=true;};setInterval(function(){if(requested){requested=false;postMessage(0);}},8);"
+			], {type: 'application/javascript'}));
+			try {
+				var clock = new Worker(url);
+				Module['knWebClock'] = 'worker';
+				MainLoop.requestAnimationFrame = function(callback) {
+					pending = callback;
+					clock.postMessage(0);
+				};
+				clock.onmessage = function() {
+					var callback = pending;
+					pending = null;
+					if (callback) callback();
+				};
+				clock.onerror = function() {
+					clock.terminate();
+					MainLoop.requestAnimationFrame = original;
+					Module['knWebClock'] = 'animation-frame';
+					console.error('Kaileron worker clock failed; hidden games may stall.');
+					var callback = pending;
+					pending = null;
+					if (callback) original(callback);
+				};
+				addEventListener('pagehide', function() { clock.terminate(); }, {once: true});
+			} catch (error) {
+				Module['knWebClock'] = 'animation-frame';
+				console.error('Kaileron worker clock unavailable', error);
+			} finally {
+				URL.revokeObjectURL(url);
+			}
+		});
 		emscripten_set_main_loop([] {
 			running_machine *machine = emscripten_running_machine;
 			if (machine->m_paused)
