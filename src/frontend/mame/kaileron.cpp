@@ -20,6 +20,7 @@
 // The web build links the Rust SDK into the same WASM as MAME.
 #include <emscripten.h>
 #include "render.h"
+#include "ui/sliders.h"
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -2930,8 +2931,15 @@ const char *kaileron_adapter::web_metrics()
 		return "{\"ready\":false}";
 	std::ostringstream status;
 	screen_device *screen = screen_device_enumerator(m_impl->machine.root_device()).first();
+	mame_ui_manager *ui = dynamic_cast<mame_ui_manager *>(&m_impl->machine.ui());
+	// The browser fixture uses the engine's untranslated slider labels to select
+	// Gamma without touching intervening chip/channel gains.
+	bool const gamma_selected = ui && ui::menu_sliders::browser_gamma_selected(*ui);
 	status << "{\"ready\":true,\"frame\":" << metrics.current_frame
+			<< ",\"exit_requested\":" << (m_impl->machine.exit_pending() ? "true" : "false")
 			<< ",\"ui_menu_active\":" << (m_impl->machine.ui().is_menu_active() ? "true" : "false")
+			<< ",\"ui_selected_index\":" << (ui ? ui::menu_sliders::browser_selection_index(*ui) : -1)
+			<< ",\"ui_gamma_selected\":" << (gamma_selected ? "true" : "false")
 			<< ",\"master_gain\":" << m_impl->machine.sound().master_gain()
 			<< ",\"screen_gamma\":" << (screen ? screen->container().get_user_settings().m_gamma : 1.0F)
 			<< ",\"input_delay_frames\":" << metrics.input_delay_frames
