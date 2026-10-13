@@ -2932,10 +2932,28 @@ const char *kaileron_adapter::web_metrics()
 			<< ",\"save_avg_us\":" << m_impl->state_store.average_save_us()
 			<< ",\"load_avg_us\":" << m_impl->state_store.average_load_us()
 			<< ",\"advance_avg_us\":" << m_impl->frame_runner.average_advance_us()
+			<< ",\"runahead_frames\":" << m_impl->runahead_frames
+			<< ",\"speculative_frames\":" << m_impl->frame_runner.speculative_presentation_count()
+			<< ",\"presentation_saves\":" << m_impl->state_store.presentation_save_count()
+			<< ",\"presentation_restores\":" << m_impl->state_store.presentation_restore_count()
+			<< ",\"presentation_reuses\":" << m_impl->state_store.presentation_reuse_count()
+			<< ",\"presentation_fallback_saves\":" << m_impl->state_store.presentation_fallback_save_count()
+			<< ",\"playback_speed_percent\":" << web_playback_speed_percent()
+			<< ",\"spectator\":" << (m_impl->spectator ? "true" : "false")
 			<< ",\"target_fps\":" << (frame_duration_us(m_impl->machine) ? 1000000.0 / frame_duration_us(m_impl->machine) : 60.0)
 			<< ",\"state_hash\":\"" << std::hex << metrics.current_state_hash << "\"}";
 	m_impl->web_status = status.str();
 	return m_impl->web_status.c_str();
+}
+
+u32 kaileron_adapter::web_playback_speed_percent() const
+{
+	return std::clamp<u32>(m_impl->sdk_playback_speed_factor / 10, 100, 400);
+}
+
+extern "C" u32 kn_web_playback_speed_percent()
+{
+	return s_web_adapter ? s_web_adapter->web_playback_speed_percent() : 100;
 }
 
 int kaileron_adapter::web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)

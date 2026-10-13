@@ -26,6 +26,7 @@ public:
 	void on_exit();
 #if defined(__EMSCRIPTEN__)
 	const char *web_metrics();
+	u32 web_playback_speed_percent() const;
 	int web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask);
 	int web_dump_snapshot(u32 frame);
 #endif

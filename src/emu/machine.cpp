@@ -1379,6 +1379,9 @@ void system_time::full_time::set(struct tm &t)
 
 running_machine * running_machine::emscripten_running_machine;
 static kaileron_web_pacer web_pacer;
+static double web_frame_period_ms = 1000.0 / 60.0;
+static u32 web_playback_speed_percent = 100;
+extern "C" u32 kn_web_playback_speed_percent();
 
 void running_machine::emscripten_main_loop()
 {
@@ -1440,7 +1443,9 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	char const *kn_mame = std::getenv("KN_MAME");
 	bool const web_kaileron_active = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0");
 	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
-	web_pacer.configure(screen ? screen->frame_period().as_double() * 1000.0 : 1000.0 / 60.0);
+	web_frame_period_ms = screen ? screen->frame_period().as_double() * 1000.0 : 1000.0 / 60.0;
+	web_playback_speed_percent = 100;
+	web_pacer.configure(web_frame_period_ms);
 	if (web_kaileron_active)
 	{
 		emscripten_set_main_loop([] {
@@ -1450,6 +1455,12 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 				web_pacer.reset();
 				emscripten_main_loop();
 				return;
+			}
+			u32 const speed = kn_web_playback_speed_percent();
+			if (speed != web_playback_speed_percent)
+			{
+				web_playback_speed_percent = speed;
+				web_pacer.configure(web_frame_period_ms * 100.0 / speed);
 			}
 			unsigned const steps = web_pacer.steps(emscripten_get_now());
 			for (unsigned step = 0; step < steps && !machine->exit_pending() && !machine->m_paused; ++step)
