@@ -2,6 +2,7 @@
 // copyright-holders:Olivier Galibert, R. Belmont
 
 #include "osdsdl.h"
+#include "webworker.h"
 
 #include "modules/input/input_common.h"
 #include "modules/lib/osdlib.h"
@@ -295,7 +296,7 @@ void sdl_osd_interface::init(running_machine &machine)
 #endif
 	/* Initialize SDL */
 
-	if (SDL_InitSubSystem(SDL_INIT_VIDEO))
+	if (SDL_InitSubSystem(kn_web_worker() ? SDL_INIT_EVENTS : SDL_INIT_VIDEO))
 	{
 		osd_printf_error("Could not initialize SDL %s\n", SDL_GetError());
 		exit(-1);
@@ -327,6 +328,12 @@ void sdl_osd_interface::input_update(bool relative_reset)
 {
 	process_events_buf();
 	poll_input_modules(relative_reset);
+}
+
+bool sdl_osd_interface::has_focus() const
+{
+	// The browser explicitly cancels controls on blur/chat/exit.
+	return kn_web_worker() || bool(m_focus_window);
 }
 
 

@@ -26,6 +26,7 @@
 // MAME headers
 #include "emucore.h"
 #include "render.h"
+#include "webworker.h"
 #include "rendersw.hxx"
 
 #if defined(__EMSCRIPTEN__)
@@ -40,6 +41,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 
 namespace osd {
@@ -126,6 +128,7 @@ private:
 	osd_dim             m_last_dim;
 #if defined(__EMSCRIPTEN__)
 	osd_dim             m_source_dim;
+	std::vector<uint32_t> m_worker_pixels;
 #endif
 };
 
@@ -236,6 +239,9 @@ void renderer_sdl1::show_info(struct SDL_RendererInfo *render_info)
 
 int renderer_sdl1::create()
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) return 0;
+#endif
 	// create renderer
 
 	/* set hints ... */
@@ -339,6 +345,29 @@ void renderer_sdl1::destroy_all_textures()
 
 int renderer_sdl1::draw(int update)
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) {
+		int const width = m_source_dim.width(), height = m_source_dim.height();
+		if (width <= 0 || height <= 0) return 0;
+		m_worker_pixels.resize(std::size_t(width) * height);
+		auto &primitives = *window().m_primlist;
+		primitives.acquire_lock();
+		// Match SDL's existing native-size path: preserve the virtual 4:3
+		// target layout, then rescale primitives into the source texture.
+		float const fw = float(width) / 768, fh = float(height) / 576;
+		for (auto &prim : primitives) {
+			prim.bounds.x0 = std::floor(fw * prim.bounds.x0 + 0.5f);
+			prim.bounds.x1 = std::floor(fw * prim.bounds.x1 + 0.5f);
+			prim.bounds.y0 = std::floor(fh * prim.bounds.y0 + 0.5f);
+			prim.bounds.y1 = std::floor(fh * prim.bounds.y1 + 0.5f);
+		}
+		software_renderer<uint32_t, 0,0,0, 0,8,16>::draw_primitives(primitives, m_worker_pixels.data(), width, height, width);
+		primitives.release_lock();
+		for (auto &pixel : m_worker_pixels) pixel |= 0xff000000;
+		EM_ASM({ Module.knWorkerVideo($0, $1, $2); }, m_worker_pixels.data(), width, height);
+		return 0;
+	}
+#endif
 	uint8_t *surfptr;
 	int32_t pitch;
 	Uint32 rmask, gmask, bmask;
@@ -709,6 +738,15 @@ static void yuv_RGB_to_YUY2X2(const uint16_t *bitmap, uint8_t *ptr, const int pi
 
 render_primitive_list *renderer_sdl1::get_primitives()
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) {
+		int width, height;
+		window().target()->compute_minimum_size(width, height);
+		m_source_dim = osd_dim(width, height);
+		window().target()->set_bounds(768, 576, window().pixel_aspect());
+		return &window().target()->get_primitives();
+	}
+#endif
 	osd_dim nd = window().get_size();
 	if (nd != m_blit_dim)
 	{

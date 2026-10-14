@@ -162,6 +162,7 @@ function stream_sink_update (
 	pBuffer,           // pointer into emscripten heap. int16 samples
 	samples_this_frame // int. number of samples at pBuffer address.
 ) {
+	if (Module.knWorkerAudio) { Module.knWorkerAudio(pBuffer, samples_this_frame); return; }
 	lazy_init();
 	if (!context) return;
 	if (samples_this_frame <= 0) return;
@@ -274,9 +275,9 @@ return {
 
 })();
 
-window.jsmame_stream_sink_update = jsmame_web_audio.stream_sink_update;
-window.jsmame_sample_count = jsmame_web_audio.sample_count;
-window.jsmame_audio_status = jsmame_web_audio.stats;
-window.jsmame_audio_clear = jsmame_web_audio.clear;
-window.jsmame_audio_resume = jsmame_web_audio.resume;
-window.jsmame_audio_suspend = function(){jsmame_web_audio.clear();var context=jsmame_web_audio.get_context();return context?context.suspend():Promise.resolve();};
+globalThis.jsmame_stream_sink_update = jsmame_web_audio.stream_sink_update;
+globalThis.jsmame_sample_count = function(){return Module.knWorker ? 0 : jsmame_web_audio.sample_count();};
+globalThis.jsmame_audio_status = jsmame_web_audio.stats;
+globalThis.jsmame_audio_clear = jsmame_web_audio.clear;
+globalThis.jsmame_audio_resume = jsmame_web_audio.resume;
+globalThis.jsmame_audio_suspend = function(){jsmame_web_audio.clear();var context=jsmame_web_audio.get_context();return context?context.suspend():Promise.resolve();};

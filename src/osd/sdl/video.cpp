@@ -9,6 +9,7 @@
 //============================================================
 
 #include "window.h"
+#include "webworker.h"
 
 // MAMEOS headers
 #include "osdsdl.h"
@@ -72,7 +73,7 @@ bool sdl_osd_interface::video_init()
 		s_window_list.emplace_back(std::move(win));
 	}
 
-	if (m_render->is_interactive())
+	if (m_render->is_interactive() && !kn_web_worker())
 	{
 		SDL_Window *const sdlwindow = dynamic_cast<sdl_window_info &>(*osd_common_t::s_window_list.front()).platform_window();
 		SDL_RaiseWindow(sdlwindow);

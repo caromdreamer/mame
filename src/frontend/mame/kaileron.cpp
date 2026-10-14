@@ -21,6 +21,7 @@
 #include <emscripten.h>
 #include "render.h"
 #include "ui/sliders.h"
+#include <SDL2/SDL.h>
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -3054,6 +3055,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_poll_input()
 	running_machine *machine = running_machine::emscripten_get_running_machine();
 	if (machine)
 		machine->osd().input_update(false);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_worker_version() { return 1; }
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_worker_key(int down, int scan)
+{
+	if (scan <= SDL_SCANCODE_UNKNOWN || scan >= SDL_NUM_SCANCODES) return 0;
+	SDL_Event event{};
+	event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+	event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+	event.key.keysym.scancode = SDL_Scancode(scan);
+	event.key.keysym.sym = SDL_GetKeyFromScancode(SDL_Scancode(scan));
+	return SDL_PushEvent(&event) == 1;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_ui_menu_active()

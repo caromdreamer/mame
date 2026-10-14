@@ -1453,6 +1453,12 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 		// Keep at most one requested wakeup so a suspended page cannot flood the
 		// event queue when it resumes. Page freezing/discarding is not preventable.
 		EM_ASM({
+			if (Module.knWorker) {
+				Module.knWebClock = 'simulation-worker';
+				Module.knWebNextDelayMs = 0;
+				MainLoop.requestAnimationFrame = function(callback) { setTimeout(callback, Math.max(0, Module.knWebNextDelayMs)); };
+				return;
+			}
 			var original = MainLoop.requestAnimationFrame;
 			var pending = null;
 			var url = URL.createObjectURL(new Blob([
@@ -1499,6 +1505,7 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 					if (paused && !Module.knBrowserInputPaused && Module.knBrowserCancelInput) Module.knBrowserCancelInput();
 					Module.knBrowserInputPaused = paused;
 					Module.knWebNextDelayMs = $0;
+					if (Module.knWorker && Module.knBrowserFrameTiming) Module.knBrowserFrameTiming(performance.now(), 0, 0, true);
 				}, web_frame_period_ms, machine->m_paused ? 1 : 0);
 				return;
 			}
