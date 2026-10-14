@@ -1891,7 +1891,10 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 		// one sample before its release is delivered to SDL.
 		if (adapter->initialized)
 			EM_ASM({ if (Module.knBrowserBeforeInput) Module.knBrowserBeforeInput(); });
-		adapter->machine.osd().input_update(false);
+		// Force the module poll at this sampling boundary. A normal OSD poll may
+		// skip within its 2 ms cache window, leaving a new SDL transition queued
+		// while JS acknowledges (and releases) it against the old keyboard state.
+		adapter->machine.osd().input_update(true);
 #endif
 		read_local_input(*adapter, out_input->bytes, out_input->len);
 		apply_native_autofire(*adapter, out_input->bytes, out_input->len, input_frame);
@@ -3027,7 +3030,30 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_input_bridge_version()
 {
-	return 2;
+	return 3;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_build_profile()
+{
+#if defined(__wasm_simd128__)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_native_scale_version()
+{
+	return 1;
+}
+
+// Used by browser bridge validation to prime the OSD poll cache at a known
+// boundary. It does not advance simulation or inject input.
+extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_poll_input()
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	if (machine)
+		machine->osd().input_update(false);
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_ui_menu_active()
