@@ -748,9 +748,9 @@ render_primitive_list *renderer_sdl1::get_primitives()
 		window().target()->compute_minimum_size(width, height);
 		// Font textures and glyph positions are generated for this virtual
 		// target. Downsampling them to e.g. 384x224 discards entire strokes.
-		// Pay the larger raster cost only while MAME's UI is visible; closing
-		// it restores native gameplay rendering on the very next frame.
-		if (window().machine().ui().is_menu_active()) {
+		// Cover every UI element, including FPS, input history and popups.
+		// An empty UI restores native gameplay rasterisation on the next frame.
+		if (auto const *ui = window().target()->ui_container(); ui && !ui->is_empty()) {
 			width = std::max(width, 768);
 			height = std::max(height, 576);
 		}
