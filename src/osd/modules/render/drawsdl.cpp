@@ -30,6 +30,8 @@
 #include "rendersw.hxx"
 
 #if defined(__EMSCRIPTEN__)
+#include "emu.h"
+#include "ui/uimain.h"
 #include <emscripten.h>
 #endif
 
@@ -354,6 +356,8 @@ int renderer_sdl1::draw(int update)
 		primitives.acquire_lock();
 		// Match SDL's existing native-size path: preserve the virtual 4:3
 		// target layout, then rescale primitives into the source texture.
+		// Menus retain the layout resolution, so font strokes are not lost
+		// by downsampling the UI to a low-resolution emulated screen.
 		float const fw = float(width) / 768, fh = float(height) / 576;
 		for (auto &prim : primitives) {
 			prim.bounds.x0 = std::floor(fw * prim.bounds.x0 + 0.5f);
@@ -742,6 +746,14 @@ render_primitive_list *renderer_sdl1::get_primitives()
 	if (kn_web_worker()) {
 		int width, height;
 		window().target()->compute_minimum_size(width, height);
+		// Font textures and glyph positions are generated for this virtual
+		// target. Downsampling them to e.g. 384x224 discards entire strokes.
+		// Pay the larger raster cost only while MAME's UI is visible; closing
+		// it restores native gameplay rendering on the very next frame.
+		if (window().machine().ui().is_menu_active()) {
+			width = std::max(width, 768);
+			height = std::max(height, 576);
+		}
 		m_source_dim = osd_dim(width, height);
 		window().target()->set_bounds(768, 576, window().pixel_aspect());
 		return &window().target()->get_primitives();
