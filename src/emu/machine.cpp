@@ -39,10 +39,13 @@
 #include <rapidjson/stringbuffer.h>
 
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten.h>
+#include "kaileron_web_pacing.h"
+#include "screen.h"
 #endif
 
 
@@ -1375,6 +1378,10 @@ void system_time::full_time::set(struct tm &t)
 #if defined(__EMSCRIPTEN__)
 
 running_machine * running_machine::emscripten_running_machine;
+static kaileron_web_pacer web_pacer;
+static double web_frame_period_ms = 1000.0 / 60.0;
+static u32 web_playback_speed_percent = 100;
+extern "C" u32 kn_web_playback_speed_percent();
 
 void running_machine::emscripten_main_loop()
 {
@@ -1385,6 +1392,16 @@ void running_machine::emscripten_main_loop()
 	// execute CPUs if not paused
 	if (!machine->m_paused)
 	{
+		if (machine->manager().kaileron_tick(*machine))
+		{
+			// The SDK owns frame advancement, including rollback and resimulation.
+			// Return to the browser event loop even when prediction is stalled.
+			if (machine->m_saveload_schedule != saveload_schedule::NONE)
+				machine->handle_saveload();
+			if (machine->exit_pending())
+				emscripten_cancel_main_loop();
+			return;
+		}
 		device_scheduler * scheduler;
 		scheduler = &(machine->scheduler());
 
@@ -1421,7 +1438,102 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 	EM_ASM (
 		JSMESS.running = true;
 	);
-	emscripten_set_main_loop(&(emscripten_main_loop), 0, 1);
+	// Advance at the game's rate independently of display refresh and visibility.
+	char const *kn_mame = std::getenv("KN_MAME");
+	bool const web_kaileron_active = kn_mame && kn_mame[0] && std::strcmp(kn_mame, "0");
+	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
+	web_frame_period_ms = screen ? screen->frame_period().as_double() * 1000.0 : 1000.0 / 60.0;
+	web_playback_speed_percent = 100;
+	web_pacer.configure(web_frame_period_ms);
+	if (web_kaileron_active)
+	{
+		// A hidden player's stopped rAF loop also stalls the visible peer at the
+		// prediction limit. A dedicated clock supplies event-loop wakeups only;
+		// MAME/SDK remain on this thread, and the pacer still owns frame timing.
+		// Keep at most one requested wakeup so a suspended page cannot flood the
+		// event queue when it resumes. Page freezing/discarding is not preventable.
+		EM_ASM({
+			if (Module.knWorker) {
+				Module.knWebClock = 'simulation-worker';
+				Module.knWebNextDelayMs = 0;
+				MainLoop.requestAnimationFrame = function(callback) { setTimeout(callback, Math.max(0, Module.knWebNextDelayMs)); };
+				return;
+			}
+			var original = MainLoop.requestAnimationFrame;
+			var pending = null;
+			var url = URL.createObjectURL(new Blob([
+				"var timer=null;onmessage=function(event){if(timer!==null)return;var delay=Math.max(0,Math.min(1000,Number(event.data)||0));timer=setTimeout(function(){timer=null;postMessage(0);},delay);};"
+			], {type: 'application/javascript'}));
+			try {
+				var clock = new Worker(url);
+				Module['knWebClock'] = 'worker';
+				Module['knWebNextDelayMs'] = 0;
+				MainLoop.requestAnimationFrame = function(callback) {
+					pending = callback;
+					clock.postMessage(Module['knWebNextDelayMs']);
+				};
+				clock.onmessage = function() {
+					var callback = pending;
+					pending = null;
+					if (callback) callback();
+				};
+				clock.onerror = function() {
+					clock.terminate();
+					MainLoop.requestAnimationFrame = original;
+					Module['knWebClock'] = 'animation-frame';
+					console.error('Kaileron worker clock failed; hidden games may stall.');
+					var callback = pending;
+					pending = null;
+					if (callback) original(callback);
+				};
+				addEventListener('pagehide', function() { clock.terminate(); }, {once: true});
+			} catch (error) {
+				Module['knWebClock'] = 'animation-frame';
+				console.error('Kaileron worker clock unavailable', error);
+			} finally {
+				URL.revokeObjectURL(url);
+			}
+		});
+		emscripten_set_main_loop([] {
+			running_machine *machine = emscripten_running_machine;
+			if (machine->m_paused)
+			{
+				web_pacer.reset();
+				emscripten_main_loop();
+				EM_ASM({
+					var paused = !!$1;
+					if (paused && !Module.knBrowserInputPaused && Module.knBrowserCancelInput) Module.knBrowserCancelInput();
+					Module.knBrowserInputPaused = paused;
+					Module.knWebNextDelayMs = $0;
+					if (Module.knWorker && Module.knBrowserFrameTiming) Module.knBrowserFrameTiming(performance.now(), 0, 0, true);
+				}, web_frame_period_ms, machine->m_paused ? 1 : 0);
+				return;
+			}
+			u32 const speed = kn_web_playback_speed_percent();
+			if (speed != web_playback_speed_percent)
+			{
+				web_playback_speed_percent = speed;
+				web_pacer.configure(web_frame_period_ms * 100.0 / speed);
+			}
+			double const start_ms = emscripten_get_now();
+			unsigned const steps = web_pacer.steps(start_ms);
+			unsigned completed_steps = 0;
+			for (; completed_steps < steps && !machine->exit_pending() && !machine->m_paused; ++completed_steps)
+				emscripten_main_loop();
+			double const end_ms = emscripten_get_now();
+			// Wake at the pacer's deadline, accounting for emulation work, rather
+			// than quantizing every frame to an unrelated 8 ms polling interval.
+			EM_ASM({
+				var paused = !!$4;
+				if (paused && !Module.knBrowserInputPaused && Module.knBrowserCancelInput) Module.knBrowserCancelInput();
+				Module.knBrowserInputPaused = paused;
+				Module.knWebNextDelayMs = $0;
+				if (Module.knBrowserFrameTiming) Module.knBrowserFrameTiming($1, $2, $3);
+			}, web_pacer.next_delay_ms(end_ms), start_ms, end_ms - start_ms, completed_steps, machine->m_paused ? 1 : 0);
+		}, 0, 1);
+	}
+	else
+		emscripten_set_main_loop(&(emscripten_main_loop), 0, 1);
 }
 
 running_machine * running_machine::emscripten_get_running_machine()

@@ -10,6 +10,9 @@
 
 #include "emu.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "audio_effects/aeffect.h"
 #include "resampler.h"
 
@@ -428,11 +431,27 @@ void sound_stream::add_dependants(std::vector<sound_stream *> &deps)
 
 //**// Gain management
 
+static bool browser_personal_gain_change()
+{
+#if defined(__EMSCRIPTEN__)
+	char const *const enabled = std::getenv("KN_MAME");
+	return enabled && !std::strcmp(enabled, "1");
+#else
+	return false;
+#endif
+}
+
 void sound_stream::set_user_output_gain(float gain)
 {
 	if(gain == m_user_output_gain)
 		return;
-	update();
+	// A personal browser slider must not advance an emulated sound chip outside
+	// the SDK frame boundary. This extra update moved QSound's ADPCM/filter/delay
+	// cursors on just one peer and produced intermittent confirmed hash conflicts.
+	// User gain changes presentation only; device-controlled gains still update
+	// at their emulated write time through set_output_gain/set_input_gain below.
+	if (!browser_personal_gain_change())
+		update();
 	m_user_output_gain = gain;
 }
 
@@ -440,7 +459,8 @@ void sound_stream::set_user_output_gain(s32 output, float gain)
 {
 	if(gain == m_user_output_channel_gain[output])
 		return;
-	update();
+	if (!browser_personal_gain_change())
+		update();
 	m_user_output_channel_gain[output] = gain;
 }
 

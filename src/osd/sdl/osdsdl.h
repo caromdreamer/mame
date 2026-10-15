@@ -159,7 +159,7 @@ public:
 	virtual void window_exit() override;
 
 	// SDL-specific
-	virtual bool has_focus() const override { return bool(m_focus_window); }
+	virtual bool has_focus() const override;
 	void release_keys();
 	bool should_hide_mouse();
 	void process_events_buf();

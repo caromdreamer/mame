@@ -26,7 +26,14 @@
 // MAME headers
 #include "emucore.h"
 #include "render.h"
+#include "webworker.h"
 #include "rendersw.hxx"
+
+#if defined(__EMSCRIPTEN__)
+#include "emu.h"
+#include "ui/uimain.h"
+#include <emscripten.h>
+#endif
 
 //#include "ui/uimain.h"
 
@@ -36,6 +43,7 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <vector>
 
 
 namespace osd {
@@ -82,6 +90,9 @@ public:
 		, m_last_vofs(0)
 		, m_blit_dim(0, 0)
 		, m_last_dim(0, 0)
+#if defined(__EMSCRIPTEN__)
+		, m_source_dim(0, 0)
+#endif
 	{
 	}
 	virtual ~renderer_sdl1();
@@ -117,6 +128,10 @@ private:
 	int                 m_last_vofs;
 	osd_dim             m_blit_dim;
 	osd_dim             m_last_dim;
+#if defined(__EMSCRIPTEN__)
+	osd_dim             m_source_dim;
+	std::vector<uint32_t> m_worker_pixels;
+#endif
 };
 
 
@@ -170,6 +185,9 @@ void renderer_sdl1::setup_texture(const osd_dim &size)
 
 		int w = m_hw_scale_width * m_scale_mode.mult_w;
 		int h = m_hw_scale_height * m_scale_mode.mult_h;
+#if defined(__EMSCRIPTEN__)
+		m_source_dim = osd_dim(m_hw_scale_width, m_hw_scale_height);
+#endif
 
 		m_texture_id = SDL_CreateTexture(m_sdl_renderer, fmt, SDL_TEXTUREACCESS_STREAMING, w, h);
 
@@ -179,6 +197,11 @@ void renderer_sdl1::setup_texture(const osd_dim &size)
 		m_texture_id = SDL_CreateTexture(m_sdl_renderer,fmt, SDL_TEXTUREACCESS_STREAMING,
 				size.width(), size.height());
 	}
+#if defined(__EMSCRIPTEN__)
+	int width = 0, height = 0;
+	if (!SDL_QueryTexture(m_texture_id, nullptr, nullptr, &width, &height))
+		EM_ASM({Module.knBrowserRasterSize = ({width:$0,height:$1});}, width, height);
+#endif
 }
 
 //============================================================
@@ -218,6 +241,9 @@ void renderer_sdl1::show_info(struct SDL_RendererInfo *render_info)
 
 int renderer_sdl1::create()
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) return 0;
+#endif
 	// create renderer
 
 	/* set hints ... */
@@ -321,6 +347,31 @@ void renderer_sdl1::destroy_all_textures()
 
 int renderer_sdl1::draw(int update)
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) {
+		int const width = m_source_dim.width(), height = m_source_dim.height();
+		if (width <= 0 || height <= 0) return 0;
+		m_worker_pixels.resize(std::size_t(width) * height);
+		auto &primitives = *window().m_primlist;
+		primitives.acquire_lock();
+		// Match SDL's existing native-size path: preserve the virtual 4:3
+		// target layout, then rescale primitives into the source texture.
+		// Menus retain the layout resolution, so font strokes are not lost
+		// by downsampling the UI to a low-resolution emulated screen.
+		float const fw = float(width) / 768, fh = float(height) / 576;
+		for (auto &prim : primitives) {
+			prim.bounds.x0 = std::floor(fw * prim.bounds.x0 + 0.5f);
+			prim.bounds.x1 = std::floor(fw * prim.bounds.x1 + 0.5f);
+			prim.bounds.y0 = std::floor(fh * prim.bounds.y0 + 0.5f);
+			prim.bounds.y1 = std::floor(fh * prim.bounds.y1 + 0.5f);
+		}
+		software_renderer<uint32_t, 0,0,0, 0,8,16>::draw_primitives(primitives, m_worker_pixels.data(), width, height, width);
+		primitives.release_lock();
+		for (auto &pixel : m_worker_pixels) pixel |= 0xff000000;
+		EM_ASM({ Module.knWorkerVideo($0, $1, $2); }, m_worker_pixels.data(), width, height);
+		return 0;
+	}
+#endif
 	uint8_t *surfptr;
 	int32_t pitch;
 	Uint32 rmask, gmask, bmask;
@@ -691,6 +742,23 @@ static void yuv_RGB_to_YUY2X2(const uint16_t *bitmap, uint8_t *ptr, const int pi
 
 render_primitive_list *renderer_sdl1::get_primitives()
 {
+#if defined(__EMSCRIPTEN__)
+	if (kn_web_worker()) {
+		int width, height;
+		window().target()->compute_minimum_size(width, height);
+		// Font textures and glyph positions are generated for this virtual
+		// target. Downsampling them to e.g. 384x224 discards entire strokes.
+		// Cover every UI element, including FPS, input history and popups.
+		// An empty UI restores native gameplay rasterisation on the next frame.
+		if (auto const *ui = window().target()->ui_container(); ui && !ui->is_empty()) {
+			width = std::max(width, 768);
+			height = std::max(height, 576);
+		}
+		m_source_dim = osd_dim(width, height);
+		window().target()->set_bounds(768, 576, window().pixel_aspect());
+		return &window().target()->get_primitives();
+	}
+#endif
 	osd_dim nd = window().get_size();
 	if (nd != m_blit_dim)
 	{
@@ -698,6 +766,23 @@ render_primitive_list *renderer_sdl1::get_primitives()
 		notify_changed();
 	}
 	window().target()->set_bounds(m_blit_dim.width(), m_blit_dim.height(), window().pixel_aspect());
+#if defined(__EMSCRIPTEN__)
+	// PlayStation titles can change visible resolution without resizing the
+	// browser window. Recreate the texture so native-size scaling preserves
+	// every source pixel and does not keep rasterising at a stale boot size.
+	if (m_scale_mode.is_scale)
+	{
+		int width = 0, height = 0;
+		window().target()->compute_minimum_size(width, height);
+		if (window().prescale())
+		{
+			width = (width * window().prescale() + 1) & ~1;
+			height = (height * window().prescale() + 1) & ~1;
+		}
+		if (osd_dim(width, height) != m_source_dim)
+			notify_changed();
+	}
+#endif
 	return &window().target()->get_primitives();
 }
 
@@ -764,6 +849,11 @@ int video_sdl1::get_scale_mode(char const *modestr)
 
 sdl_scale_mode const video_sdl1::s_scale_modes[] = {
 		{ "none",    0, 0, 1, 1, DRAW2_SCALEMODE_NEAREST, 0,                    nullptr },
+#if defined(__EMSCRIPTEN__)
+		// Rasterise at the emulated target's minimum size. SDL scales the final
+		// texture instead of spending WASM time rasterising every display pixel.
+		{ "hwnearest", 1, 0, 1, 1, DRAW2_SCALEMODE_NEAREST, 0,                  nullptr },
+#endif
 		{ "hwblit",  1, 0, 1, 1, DRAW2_SCALEMODE_LINEAR,  0,                    nullptr },
 		{ "hwbest",  1, 0, 1, 1, DRAW2_SCALEMODE_BEST,    0,                    nullptr },
 		/* SDL1.2 uses interpolation as well */
