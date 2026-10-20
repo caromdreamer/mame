@@ -1033,7 +1033,8 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 
 	u32 speed_percent = control.target_speed_percent ? control.target_speed_percent : 100;
 	speed_percent = std::clamp<u32>(speed_percent, 100, 12800);
-	u32 const speed_factor = speed_percent * 10;
+	bool const unlimited = env_enabled("KN_REPLAY_PLAYBACK") && control.reserved[0] == 1 && control.target_speed_percent == UINT32_MAX;
+	u32 const speed_factor = unlimited ? UINT32_MAX : speed_percent * 10;
 	bool const enabled = speed_factor != 1000;
 	if (enabled)
 	{
@@ -3003,6 +3004,8 @@ const char *kaileron_adapter::web_metrics()
 
 u32 kaileron_adapter::web_playback_speed_percent() const
 {
+	if (env_enabled("KN_REPLAY_PLAYBACK") && m_impl->sdk_playback_speed_factor == UINT32_MAX)
+		return UINT32_MAX;
 	return std::clamp<u32>(m_impl->sdk_playback_speed_factor / 10, 100, env_enabled("KN_REPLAY_PLAYBACK") ? 1600 : 400);
 }
 

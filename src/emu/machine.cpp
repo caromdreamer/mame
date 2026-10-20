@@ -1513,13 +1513,23 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 			if (speed != web_playback_speed_percent)
 			{
 				web_playback_speed_percent = speed;
-				web_pacer.configure(web_frame_period_ms * 100.0 / speed);
+				web_pacer.configure(speed == UINT32_MAX ? web_frame_period_ms : web_frame_period_ms * 100.0 / speed);
 			}
 			double const start_ms = emscripten_get_now();
-			unsigned const steps = web_pacer.steps(start_ms);
+			bool const unlimited = speed == UINT32_MAX;
+			unsigned const steps = unlimited ? UINT32_MAX : web_pacer.steps(start_ms);
 			unsigned completed_steps = 0;
 			for (; completed_steps < steps && !machine->exit_pending() && !machine->m_paused; ++completed_steps)
+			{
 				emscripten_main_loop();
+				// Local replay has no wall-clock speed limit. Yield regularly for
+				// input/download/control tasks, and stop the batch at a seek target.
+				if (unlimited && (kn_web_playback_speed_percent() != UINT32_MAX || emscripten_get_now() - start_ms >= 8.0))
+				{
+					++completed_steps;
+					break;
+				}
+			}
 			double const end_ms = emscripten_get_now();
 			// Wake at the pacer's deadline, accounting for emulation work, rather
 			// than quantizing every frame to an unrelated 8 ms polling interval.
@@ -1529,7 +1539,7 @@ void running_machine::emscripten_set_running_machine(running_machine *machine)
 				Module.knBrowserInputPaused = paused;
 				Module.knWebNextDelayMs = $0;
 				if (Module.knBrowserFrameTiming) Module.knBrowserFrameTiming($1, $2, $3);
-			}, web_pacer.next_delay_ms(end_ms), start_ms, end_ms - start_ms, completed_steps, machine->m_paused ? 1 : 0);
+			}, unlimited ? 0 : web_pacer.next_delay_ms(end_ms), start_ms, end_ms - start_ms, completed_steps, machine->m_paused ? 1 : 0);
 		}, 0, 1);
 	}
 	else
