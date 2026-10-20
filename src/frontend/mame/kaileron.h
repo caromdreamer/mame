@@ -433,6 +433,11 @@ KN_API KnResult KN_CALL kn_host_session_apply_confirmed_frame(
 KN_API KnResult KN_CALL kn_host_session_get_metrics(KnHostSession *session,
                                                     KnMetrics *out_metrics);
 
+/* Local replay only. UINT32_MAX leaves the seek target unchanged. */
+KN_API KnResult KN_CALL kn_host_session_replay_control(
+    KnHostSession *session, uint32_t end_frame, uint32_t speed_percent,
+    uint32_t paused, uint32_t seek_frame);
+
 KN_API KnResult KN_CALL kn_host_session_get_playback_control(
     KnHostSession *session,
     KnPlaybackControl *out_control);

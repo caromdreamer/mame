@@ -31,6 +31,7 @@ public:
 	int web_dump_snapshot(u32 frame);
 	int web_snapshot_manifest(u32 frame);
 	int web_set_runahead(u32 frames);
+	int web_replay_control(u32 speed, u32 paused, u32 seek);
 #endif
 
 public:

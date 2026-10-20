@@ -2715,6 +2715,8 @@ bool kaileron_adapter::initialize()
 	m_impl->initialized = true;
 #if defined(__EMSCRIPTEN__)
 	s_web_adapter = this;
+	u32 const replay_end = env_u32("KN_REPLAY_NAV_END", 0);
+	if (replay_end && web_replay_control(100, 0, UINT32_MAX) != KN_OK) return false;
 #endif
 	osd_printf_info(
 			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u runahead=%u sdk=%s\n",
@@ -2949,6 +2951,8 @@ const char *kaileron_adapter::web_metrics()
 	KnMetrics metrics = {};
 	if (!m_impl->session || m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)
 		return "{\"ready\":false}";
+	KnPlaybackControl replay_control = {};
+	kn_host_session_get_playback_control(m_impl->session, &replay_control);
 	std::ostringstream status;
 	screen_device *screen = screen_device_enumerator(m_impl->machine.root_device()).first();
 	mame_ui_manager *ui = dynamic_cast<mame_ui_manager *>(&m_impl->machine.ui());
@@ -2985,6 +2989,13 @@ const char *kaileron_adapter::web_metrics()
 			<< ",\"playback_speed_percent\":" << web_playback_speed_percent()
 			<< ",\"spectator\":" << (m_impl->spectator ? "true" : "false")
 			<< ",\"target_fps\":" << (frame_duration_us(m_impl->machine) ? 1000000.0 / frame_duration_us(m_impl->machine) : 60.0)
+			<< ",\"replay_navigation\":" << replay_control.reserved[0]
+			<< ",\"replay_end_frame\":" << replay_control.reserved[1]
+			<< ",\"replay_paused\":" << replay_control.reserved[2]
+			<< ",\"replay_target_frame\":" << replay_control.reserved[3]
+			<< ",\"replay_speed\":" << replay_control.reserved[4]
+			<< ",\"replay_cache_points\":" << replay_control.reserved[5]
+			<< ",\"replay_cache_bytes\":" << replay_control.reserved[6]
 			<< ",\"state_hash\":\"" << std::hex << metrics.current_state_hash << "\"}";
 	m_impl->web_status = status.str();
 	return m_impl->web_status.c_str();
@@ -2992,7 +3003,7 @@ const char *kaileron_adapter::web_metrics()
 
 u32 kaileron_adapter::web_playback_speed_percent() const
 {
-	return std::clamp<u32>(m_impl->sdk_playback_speed_factor / 10, 100, 400);
+	return std::clamp<u32>(m_impl->sdk_playback_speed_factor / 10, 100, env_enabled("KN_REPLAY_PLAYBACK") ? 1600 : 400);
 }
 
 extern "C" u32 kn_web_playback_speed_percent()
@@ -3128,6 +3139,17 @@ int kaileron_adapter::web_dump_snapshot(u32 frame)
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_dump_snapshot(u32 frame)
 {
 	return s_web_adapter ? s_web_adapter->web_dump_snapshot(frame) : 0;
+}
+
+int kaileron_adapter::web_replay_control(u32 speed, u32 paused, u32 seek)
+{
+    if (!m_impl->session || !env_enabled("KN_REPLAY_PLAYBACK")) return KN_ERR_INVALID_ARGUMENT;
+    return kn_host_session_replay_control(m_impl->session, env_u32("KN_REPLAY_NAV_END", 0), speed, paused, seek);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_replay_control(u32 speed, u32 paused, u32 seek)
+{
+    return s_web_adapter ? s_web_adapter->web_replay_control(speed, paused, seek) : KN_ERR_INVALID_ARGUMENT;
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
