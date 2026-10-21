@@ -20,6 +20,10 @@
 #include "modules/monitor/monitor_common.h"
 #include "osdsdl.h"
 #include "window.h"
+#include "webworker.h"
+#if defined(__EMSCRIPTEN__)
+#include <emscripten.h>
+#endif
 
 // standard SDL headers
 #include <SDL2/SDL_syswm.h>
@@ -271,6 +275,7 @@ void sdl_window_info::modify_prescale(int dir)
 
 void sdl_window_info::update_cursor_state()
 {
+	if (kn_web_worker()) return; // DOM cursor/capture belong to the browser host.
 #if (USE_XINPUT && USE_XINPUT_WII_LIGHTGUN_HACK)
 	// Hack for wii-lightguns:
 	// they stop working with a grabbed mouse;
@@ -626,6 +631,7 @@ error:
 
 void sdl_window_info::complete_destroy()
 {
+	if (kn_web_worker()) { renderer_reset(); return; }
 	// Release pointer grab and hide if needed
 	show_pointer();
 	release_pointer();
@@ -804,6 +810,8 @@ void sdl_window_info::update()
 
 int sdl_window_info::complete_create()
 {
+	// A Worker has no DOM/SDL window. MAME still owns its render target.
+	if (kn_web_worker()) { renderer_create(); return renderer().create(); }
 	osd_dim temp(0,0);
 
 	// clear out original mode. Needed on OSX
@@ -1235,10 +1243,26 @@ osd_dim sdl_window_info::get_min_bounds(int constrain)
 
 osd_dim sdl_window_info::get_size()
 {
+	if (kn_web_worker()) return osd_dim(768, 576);
 	int w=0; int h=0;
 	SDL_GetWindowSize(platform_window(), &w, &h);
 	return osd_dim(w,h);
 }
+
+#if defined(__EMSCRIPTEN__)
+extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_worker_pointer(int action, int x, int y, int button)
+{
+	if (!kn_web_worker() || osd_common_t::window_list().empty()) return;
+	auto &window = downcast<sdl_window_info &>(*osd_common_t::window_list().front());
+	if (action == 3) { window.mouse_left(0); return; }
+	window.mouse_entered(0);
+	window.machine().ui_input().push_window_focus_event(window.target());
+	if (action == 0) window.mouse_moved(0, x, y);
+	else if (action == 1 && button >= 0 && button <= 2) window.mouse_down(0, x, y, button);
+	else if (action == 2 && button >= 0 && button <= 2) window.mouse_up(0, x, y, button);
+	else if (action == 4) window.mouse_wheel(0, y);
+}
+#endif
 
 
 //============================================================

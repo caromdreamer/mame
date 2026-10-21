@@ -2,9 +2,16 @@
 -- copyright-holders:MAMEdev Team
 STANDALONE = false
 
+newoption {
+	trigger = "KAILERON_SDK_ARCHIVE",
+	description = "Rust Kaileron static archive for the Emscripten build",
+}
+
 -- Big project specific
-premake.make.makefile_ignore = true
-premake._checkgenerate = false
+-- Web compile flags (renderer, exception ABI, threading) must invalidate objects.
+premake.make.makefile_ignore = (_OPTIONS["targetos"] ~= "asmjs")
+-- Preserve incremental object builds while iterating on the web integration.
+premake._checkgenerate = (_OPTIONS["targetos"] == "asmjs")
 
 newoption {
 	trigger = 'build-dir',
@@ -1098,8 +1105,16 @@ configuration { "asmjs" }
 	}
 	buildoptions_cpp {
 		"-std=c++20",
-		"-s EXCEPTION_CATCHING_ALLOWED=\"['_ZN15running_machine17start_all_devicesEv','_ZN12cli_frontend7executeEiPPc','_ZN8chd_file11open_commonEb','_ZN8chd_file13read_metadataEjjRNSt3__212basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE','_ZN8chd_file13read_metadataEjjRNSt3__26vectorIhNS0_9allocatorIhEEEE','_ZNK19netlist_mame_device19base_validity_checkER16validity_checker']\"",
 	}
+	if _OPTIONS["KAILERON_SDK_ARCHIVE"] then
+		-- Rust's Emscripten std uses WASM exception handling. Match it in C++.
+		buildoptions_cpp { "-fwasm-exceptions" }
+		linkoptions { "-fwasm-exceptions", "-s WASM_BIGINT=1" }
+	else
+		buildoptions_cpp {
+			"-s EXCEPTION_CATCHING_ALLOWED=\"['_ZN15running_machine17start_all_devicesEv','_ZN12cli_frontend7executeEiPPc','_ZN8chd_file11open_commonEb','_ZN8chd_file13read_metadataEjjRNSt3__212basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE','_ZN8chd_file13read_metadataEjjRNSt3__26vectorIhNS0_9allocatorIhEEEE','_ZNK19netlist_mame_device19base_validity_checkER16validity_checker']\"",
+		}
+	end
 	defines {
 		"ASIO_HAS_PTHREADS",
 		"SOUND_DISABLE_THREADING",
@@ -1110,7 +1125,7 @@ configuration { "asmjs" }
 		"-s USE_SDL_TTF=2",
 		"-s DEFAULT_LIBRARY_FUNCS_TO_INCLUDE=\"['\\$$ERRNO_CODES']\"",
 		"-s EXPORTED_FUNCTIONS=\"['_main', '_malloc', '__ZN15running_machine30emscripten_get_running_machineEv', '__ZN15running_machine17emscripten_get_uiEv', '__ZN15running_machine20emscripten_get_soundEv', '__ZN15mame_ui_manager12set_show_fpsEb', '__ZNK15mame_ui_manager8show_fpsEv', '__ZN13sound_manager4muteEbh', '_SDL_PauseAudio', '_SDL_SendKeyboardKey', '__ZN15running_machine15emscripten_saveEPKc', '__ZN15running_machine15emscripten_loadEPKc', '__ZN15running_machine21emscripten_hard_resetEv', '__ZN15running_machine21emscripten_soft_resetEv', '__ZN15running_machine15emscripten_exitEv']\"",
-		"-s EXPORTED_RUNTIME_METHODS=\"['cwrap']\"",
+		"-s EXPORTED_RUNTIME_METHODS=\"['cwrap', 'FS', 'ENV']\"",
 		"-s ERROR_ON_UNDEFINED_SYMBOLS=0",
 		"-s STACK_SIZE=5MB",
 		"-s MAX_WEBGL_VERSION=2",

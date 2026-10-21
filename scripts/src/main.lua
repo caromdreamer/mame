@@ -129,6 +129,21 @@ if (STANDALONE~=true) then
 		"frontend",
 	}
 end
+	if _OPTIONS["targetos"] == "asmjs" then
+		if not _OPTIONS["KAILERON_SDK_ARCHIVE"] or not os.isfile(_OPTIONS["KAILERON_SDK_ARCHIVE"]) then
+			error("Kaileron web builds require KAILERON_SDK_ARCHIVE pointing to the Rust Emscripten static library")
+		end
+		linkoptions {
+			_MAKE.esc(_OPTIONS["KAILERON_SDK_ARCHIVE"]),
+			"-s ERROR_ON_UNDEFINED_SYMBOLS=1",
+			"--profiling-funcs",
+			"--js-library " .. _MAKE.esc(MAME_DIR .. "../../web/prototype/transport-library.js"),
+		}
+		dependency {
+			{ "$(TARGET)", _OPTIONS["KAILERON_SDK_ARCHIVE"], true },
+			{ "$(TARGET)", MAME_DIR .. "../../web/prototype/transport-library.js", true },
+		}
+	end
 	links {
 		"optional",
 		"emu",

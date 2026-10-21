@@ -278,10 +278,17 @@ int mame_machine_manager::execute()
 		}
 
 		// create the machine configuration
+#if defined(__EMSCRIPTEN__)
+		m_web_machine.reset();
+		m_web_config = std::make_unique<machine_config>(*system, m_options);
+		m_web_machine = std::make_unique<running_machine>(*m_web_config, *this);
+		running_machine &machine = *m_web_machine;
+#else
 		machine_config config(*system, m_options);
 
 		// create the machine structure and driver
 		running_machine machine(config, *this);
+#endif
 
 		set_machine(&machine);
 
@@ -471,8 +478,13 @@ void emulator_info::display_ui_chooser(running_machine& machine)
 
 int emulator_info::start_frontend(emu_options &options, osd_interface &osd, std::vector<std::string> &args)
 {
+#if defined(__EMSCRIPTEN__)
+	static auto web_frontend = std::make_unique<cli_frontend>(options, osd);
+	return web_frontend->execute(args);
+#else
 	cli_frontend frontend(options, osd);
 	return frontend.execute(args);
+#endif
 }
 
 int emulator_info::start_frontend(emu_options &options, osd_interface &osd, int argc, char *argv[])

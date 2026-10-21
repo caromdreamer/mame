@@ -798,6 +798,10 @@ ifdef LDOPTS
 PARAMS += --LDOPTS='$(LDOPTS)'
 endif
 
+ifdef KAILERON_SDK_ARCHIVE
+PARAMS += --KAILERON_SDK_ARCHIVE='$(KAILERON_SDK_ARCHIVE)'
+endif
+
 ifdef LTO
 PARAMS += --LTO='$(LTO)'
 endif

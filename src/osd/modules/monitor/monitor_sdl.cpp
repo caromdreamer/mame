@@ -17,6 +17,7 @@
 
 #include "osdcore.h"
 #include "window.h"
+#include "webworker.h"
 
 #ifdef SDLMAME_SDL3
 #include <SDL3/SDL.h>
@@ -48,6 +49,12 @@ public:
 private:
 	void refresh() override
 	{
+		if (kn_web_worker()) {
+			m_pos_size = osd_rect(0, 0, 1024, 768);
+			m_usuable_pos_size = m_pos_size;
+			m_is_primary = true;
+			return;
+		}
 #ifndef SDLMAME_SDL3
 		SDL_DisplayMode dmode;
 
@@ -128,7 +135,7 @@ protected:
 			int num_displays = 0;
 			const auto displays = SDL_GetDisplays(&num_displays);
 #else
-			int num_displays = SDL_GetNumVideoDisplays();
+			int num_displays = kn_web_worker() ? 1 : SDL_GetNumVideoDisplays();
 #endif
 			for (i = 0; i < num_displays; i++)
 			{

@@ -16,7 +16,13 @@
 #include "uiinput.h"
 #include "ui/uimain.h"
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+// The web build links the Rust SDK into the same WASM as MAME.
+#include <emscripten.h>
+#include "render.h"
+#include "ui/sliders.h"
+#include <SDL2/SDL.h>
+#elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -31,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -38,6 +45,9 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#if defined(__EMSCRIPTEN__)
+#include <map>
+#endif
 #include <sstream>
 #include <string>
 #include <thread>
@@ -52,6 +62,10 @@ std::string g_kn_mame_scoreboard_overlay;
 bool g_kn_mame_chat_active = false;
 std::u32string g_kn_mame_chat_pending_chars;
 
+#if defined(__EMSCRIPTEN__)
+static kaileron_adapter *s_web_adapter = nullptr;
+#endif
+
 namespace {
 
 using kn_config_init_fn = KnResult (*)(KnConfig *);
@@ -64,7 +78,9 @@ using kn_host_session_get_metrics_fn = KnResult (*)(KnHostSession *, KnMetrics *
 using kn_host_session_get_playback_status_fn = KnResult (*)(KnHostSession *, KnPlaybackStatus *);
 using kn_host_session_leave_fn = void (*)(KnHostSession *);
 
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+using sdk_library_handle = void *;
+#elif defined(_WIN32)
 using sdk_library_handle = HMODULE;
 #else
 using sdk_library_handle = void *;
@@ -322,7 +338,9 @@ static void scripted_digital_input(u8 *bytes, u32 len, u32 frame, u32 player)
 
 const char *default_sdk_library_path()
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return "statically linked Kaileron SDK";
+#elif defined(_WIN32)
 	return "kaileron.dll";
 #elif defined(__APPLE__)
 	return "target/debug/libkaileron.dylib";
@@ -333,7 +351,9 @@ const char *default_sdk_library_path()
 
 sdk_library_handle open_sdk_library(const char *path, std::string &error)
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return nullptr; // initialize() uses direct SDK symbols in the web build.
+#elif defined(_WIN32)
 	sdk_library_handle library = LoadLibraryA(path);
 	if (!library)
 		error = "Windows error " + std::to_string(GetLastError());
@@ -350,7 +370,9 @@ void close_sdk_library(sdk_library_handle library)
 {
 	if (!library)
 		return;
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return;
+#elif defined(_WIN32)
 	FreeLibrary(library);
 #else
 	dlclose(library);
@@ -360,7 +382,9 @@ void close_sdk_library(sdk_library_handle library)
 template <typename T>
 bool load_symbol(sdk_library_handle library, const char *name, T &out)
 {
-#if defined(_WIN32)
+#if defined(__EMSCRIPTEN__)
+	return false; // No platform DLL loader in the statically linked web build.
+#elif defined(_WIN32)
 	out = reinterpret_cast<T>(GetProcAddress(library, name));
 #else
 	out = reinterpret_cast<T>(dlsym(library, name));
@@ -564,6 +588,10 @@ struct kaileron_adapter::impl
 	bool remote_bootstrap_enabled = false;
 	bool determinism_bootstrap_ready = false;
 	std::array<bool, 3> determinism_checkpoints_written = {false, false, false};
+#if defined(__EMSCRIPTEN__)
+	std::map<u32, std::vector<std::vector<u8>>> web_inputs;
+	std::string web_status;
+#endif
 };
 
 constexpr u32 INPUT_OVERLAY_ROWS = 13;
@@ -1005,7 +1033,8 @@ static void apply_playback_control(kaileron_adapter::impl &adapter, const KnPlay
 
 	u32 speed_percent = control.target_speed_percent ? control.target_speed_percent : 100;
 	speed_percent = std::clamp<u32>(speed_percent, 100, 12800);
-	u32 const speed_factor = speed_percent * 10;
+	bool const unlimited = env_enabled("KN_REPLAY_PLAYBACK") && control.reserved[0] == 1 && control.target_speed_percent == UINT32_MAX;
+	u32 const speed_factor = unlimited ? UINT32_MAX : speed_percent * 10;
 	bool const enabled = speed_factor != 1000;
 	if (enabled)
 	{
@@ -1858,11 +1887,26 @@ static KnResult KN_CALL kn_mame_poll_local_input(void *user, u32 input_frame, Kn
 	out_input->len = std::min<u32>(out_input->cap, adapter->input_size);
 	if (out_input->len > 0 && env_enabled("KN_MAME_LOCAL_INPUT"))
 	{
+#if defined(__EMSCRIPTEN__)
+		// Drain browser transitions at the actual SDK sampling boundary, including
+		// multiple samples in one catch-up tick. A short down/up must be visible to
+		// one sample before its release is delivered to SDL.
+		if (adapter->initialized)
+			EM_ASM({ if (Module.knBrowserBeforeInput) Module.knBrowserBeforeInput(); });
+		// Force the module poll at this sampling boundary. A normal OSD poll may
+		// skip within its 2 ms cache window, leaving a new SDL transition queued
+		// while JS acknowledges (and releases) it against the old keyboard state.
+		adapter->machine.osd().input_update(true);
+#endif
 		read_local_input(*adapter, out_input->bytes, out_input->len);
 		apply_native_autofire(*adapter, out_input->bytes, out_input->len, input_frame);
 		if (adapter->trace && out_input->bytes[0] != adapter->last_local_input)
 			osd_printf_info("Kaileron trace: local_input frame=%u player=%u input=%02x\n", input_frame, adapter->player_id, out_input->bytes[0]);
 		adapter->last_local_input = out_input->bytes[0];
+#if defined(__EMSCRIPTEN__)
+		if (adapter->initialized)
+			EM_ASM({ if (Module.knBrowserInputSampled) Module.knBrowserInputSampled($0, $1, $2); }, input_frame, out_input->bytes, out_input->len);
+#endif
 	}
 	else if (out_input->len > 0 && env_enabled("KN_MAME_SCRIPT_INPUT"))
 	{
@@ -1921,6 +1965,15 @@ static KnResult KN_CALL kn_mame_advance_frame(void *user, u32 frame, const KnInp
 
 	if (adapter->trace && adapter->state_store.load_count() > 0)
 		osd_printf_info("Kaileron trace: advance_frame frame=%u before mame_frames=%u loads=%u\n", frame, adapter->frame_runner.completed_frame_count(), adapter->state_store.load_count());
+#if defined(__EMSCRIPTEN__)
+	// Keep a bounded input history for the local late-input validation control.
+	std::vector<std::vector<u8>> web_inputs;
+	for (u32 player = 0; player < player_count; player++)
+		web_inputs.emplace_back(players[player].bytes, players[player].bytes + players[player].len);
+	adapter->web_inputs[frame] = std::move(web_inputs);
+	while (adapter->web_inputs.size() > adapter->state_store.slot_capacity())
+		adapter->web_inputs.erase(adapter->web_inputs.begin());
+#endif
 	if (adapter->show_input_overlay)
 		record_input_history(*adapter, frame, players, player_count);
 
@@ -2450,6 +2503,10 @@ kaileron_adapter::kaileron_adapter(running_machine &machine) :
 
 kaileron_adapter::~kaileron_adapter()
 {
+#if defined(__EMSCRIPTEN__)
+	if (s_web_adapter == this)
+		s_web_adapter = nullptr;
+#endif
 	on_exit();
 	if (m_impl->session && m_impl->kn_host_session_destroy)
 		m_impl->kn_host_session_destroy(m_impl->session);
@@ -2464,6 +2521,17 @@ bool kaileron_adapter::initialize()
 {
 	const char *library_path = env_value("KN_SDK_LIB", default_sdk_library_path());
 	show_kaileron_status(m_impl->machine, std::string("Kaileron: loading SDK ") + library_path);
+#if defined(__EMSCRIPTEN__)
+	m_impl->kn_config_init = &kn_config_init;
+	m_impl->kn_callbacks_init = &kn_callbacks_init;
+	m_impl->kn_playback_status_init = &kn_playback_status_init;
+	m_impl->kn_host_session_create = &kn_host_session_create;
+	m_impl->kn_host_session_destroy = &kn_host_session_destroy;
+	m_impl->kn_host_session_tick = &kn_host_session_tick;
+	m_impl->kn_host_session_get_metrics = &kn_host_session_get_metrics;
+	m_impl->kn_host_session_get_playback_status = &kn_host_session_get_playback_status;
+	m_impl->kn_host_session_leave = &kn_host_session_leave;
+#else
 	std::string load_error;
 	m_impl->library = open_sdk_library(library_path, load_error);
 	if (!m_impl->library)
@@ -2487,6 +2555,7 @@ bool kaileron_adapter::initialize()
 		show_kaileron_status(m_impl->machine, "Kaileron: SDK symbol load failed");
 		return false;
 	}
+#endif
 	show_kaileron_status(m_impl->machine, "Kaileron: SDK symbols loaded");
 
 	const char *server = env_value("KN_SERVER", "");
@@ -2645,6 +2714,11 @@ bool kaileron_adapter::initialize()
 	}
 
 	m_impl->initialized = true;
+#if defined(__EMSCRIPTEN__)
+	s_web_adapter = this;
+	u32 const replay_end = env_u32("KN_REPLAY_NAV_END", 0);
+	if (replay_end && web_replay_control(100, 0, UINT32_MAX) != KN_OK) return false;
+#endif
 	osd_printf_info(
 			"Kaileron: enabled server=%s session=%s player=%u/%u input_size=%u runahead=%u sdk=%s\n",
 			server[0] ? server : "(local)",
@@ -2676,7 +2750,9 @@ bool kaileron_adapter::tick()
 	switch (prepare_determinism_bootstrap(*m_impl))
 	{
 	case determinism_bootstrap_result::waiting:
+#if !defined(__EMSCRIPTEN__)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
 		return true;
 	case determinism_bootstrap_result::failed:
 		osd_printf_error(
@@ -2695,6 +2771,12 @@ bool kaileron_adapter::tick()
 	m_impl->rollback_replay_active = false;
 	m_impl->presentation_ready = false;
 	m_impl->sdk_pace_delay_us = 0;
+#if defined(__EMSCRIPTEN__)
+	// Browser key events enqueue SDL input between animation callbacks.
+	// Refresh physical host input before the SDK samples this frame, instead
+	// of waiting for the video update after an emulated frame has advanced.
+	m_impl->machine.osd().input_update(false);
+#endif
 	KnResult result = m_impl->kn_host_session_tick(m_impl->session);
 	m_impl->rollback_replay_active = false;
 	if (result == KN_ERR_REPLAY_COMPLETE)
@@ -2706,6 +2788,9 @@ bool kaileron_adapter::tick()
 	else if (result != KN_OK)
 	{
 		osd_printf_error("Kaileron: tick failed result=%d\n", int(result));
+#if defined(__EMSCRIPTEN__)
+		EM_ASM({if(Module.knBrowserSessionError)Module.knBrowserSessionError($0);}, int(result));
+#endif
 		m_impl->machine.schedule_exit();
 	}
 	else
@@ -2774,7 +2859,9 @@ bool kaileron_adapter::tick()
 		{
 			m_impl->pace_sleep_count++;
 			m_impl->pace_sleep_time_us += m_impl->sdk_pace_delay_us;
+#if !defined(__EMSCRIPTEN__)
 			std::this_thread::sleep_for(std::chrono::microseconds(m_impl->sdk_pace_delay_us));
+#endif
 		}
 	}
 	return true;
@@ -2858,3 +2945,220 @@ void kaileron_adapter::on_exit()
 				metrics.confirmed_nack_sent);
 	}
 }
+
+#if defined(__EMSCRIPTEN__)
+const char *kaileron_adapter::web_metrics()
+{
+	KnMetrics metrics = {};
+	if (!m_impl->session || m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK)
+		return "{\"ready\":false}";
+	KnPlaybackControl replay_control = {};
+	kn_host_session_get_playback_control(m_impl->session, &replay_control);
+	std::ostringstream status;
+	screen_device *screen = screen_device_enumerator(m_impl->machine.root_device()).first();
+	mame_ui_manager *ui = dynamic_cast<mame_ui_manager *>(&m_impl->machine.ui());
+	// The browser fixture uses the engine's untranslated slider labels to select
+	// Gamma without touching intervening chip/channel gains.
+	bool const gamma_selected = ui && ui::menu_sliders::browser_gamma_selected(*ui);
+	status << "{\"ready\":true,\"frame\":" << metrics.current_frame
+			<< ",\"exit_requested\":" << (m_impl->machine.exit_pending() ? "true" : "false")
+			<< ",\"ui_menu_active\":" << (m_impl->machine.ui().is_menu_active() ? "true" : "false")
+			<< ",\"ui_selected_index\":" << (ui ? ui::menu_sliders::browser_selection_index(*ui) : -1)
+			<< ",\"ui_gamma_selected\":" << (gamma_selected ? "true" : "false")
+			<< ",\"master_gain\":" << m_impl->machine.sound().master_gain()
+			<< ",\"screen_gamma\":" << (screen ? screen->container().get_user_settings().m_gamma : 1.0F)
+			<< ",\"input_delay_frames\":" << metrics.input_delay_frames
+			<< ",\"confirmed_frames\":" << metrics.confirmed_frame_count
+			<< ",\"prediction_stalls\":" << metrics.prediction_stall_frames
+			<< ",\"disconnected_mask\":" << metrics.disconnected_mask
+			<< ",\"local_input\":" << unsigned(m_impl->last_local_input)
+			<< ",\"rollbacks\":" << metrics.rollback_count
+			<< ",\"max_rollback\":" << metrics.max_rollback_frames
+			<< ",\"replayed_frames\":" << m_impl->frame_runner.rollback_resimulation_count()
+			<< ",\"loads\":" << m_impl->state_store.load_count()
+			<< ",\"snapshot_bytes\":" << m_impl->state_store.last_snapshot_size()
+			<< ",\"snapshot_slots\":" << m_impl->state_store.valid_slot_count()
+			<< ",\"save_avg_us\":" << m_impl->state_store.average_save_us()
+			<< ",\"load_avg_us\":" << m_impl->state_store.average_load_us()
+			<< ",\"advance_avg_us\":" << m_impl->frame_runner.average_advance_us()
+			<< ",\"runahead_frames\":" << m_impl->runahead_frames
+			<< ",\"speculative_frames\":" << m_impl->frame_runner.speculative_presentation_count()
+			<< ",\"presentation_saves\":" << m_impl->state_store.presentation_save_count()
+			<< ",\"presentation_restores\":" << m_impl->state_store.presentation_restore_count()
+			<< ",\"presentation_reuses\":" << m_impl->state_store.presentation_reuse_count()
+			<< ",\"presentation_fallback_saves\":" << m_impl->state_store.presentation_fallback_save_count()
+			<< ",\"playback_speed_percent\":" << web_playback_speed_percent()
+			<< ",\"spectator\":" << (m_impl->spectator ? "true" : "false")
+			<< ",\"target_fps\":" << (frame_duration_us(m_impl->machine) ? 1000000.0 / frame_duration_us(m_impl->machine) : 60.0)
+			<< ",\"replay_navigation\":" << replay_control.reserved[0]
+			<< ",\"replay_end_frame\":" << replay_control.reserved[1]
+			<< ",\"replay_paused\":" << replay_control.reserved[2]
+			<< ",\"replay_target_frame\":" << replay_control.reserved[3]
+			<< ",\"replay_speed\":" << replay_control.reserved[4]
+			<< ",\"replay_cache_points\":" << replay_control.reserved[5]
+			<< ",\"replay_cache_bytes\":" << replay_control.reserved[6]
+			<< ",\"state_hash\":\"" << std::hex << metrics.current_state_hash << "\"}";
+	m_impl->web_status = status.str();
+	return m_impl->web_status.c_str();
+}
+
+u32 kaileron_adapter::web_playback_speed_percent() const
+{
+	if (env_enabled("KN_REPLAY_PLAYBACK") && m_impl->sdk_playback_speed_factor == UINT32_MAX)
+		return UINT32_MAX;
+	return std::clamp<u32>(m_impl->sdk_playback_speed_factor / 10, 100, env_enabled("KN_REPLAY_PLAYBACK") ? 1600 : 400);
+}
+
+extern "C" u32 kn_web_playback_speed_percent()
+{
+	return s_web_adapter ? s_web_adapter->web_playback_speed_percent() : 100;
+}
+
+int kaileron_adapter::web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
+{
+	// This diagnostic is only valid for the offline prototype, on the game thread.
+	if (!m_impl->session || m_impl->networked || !xor_mask || xor_mask > 255)
+		return KN_ERR_INVALID_ARGUMENT;
+	KnMetrics metrics = {};
+	if (m_impl->kn_host_session_get_metrics(m_impl->session, &metrics) != KN_OK ||
+			frame >= metrics.current_frame)
+		return KN_ERR_INVALID_ARGUMENT;
+	auto const found = m_impl->web_inputs.find(frame);
+	if (found == m_impl->web_inputs.end() || player >= found->second.size() ||
+			byte >= found->second[player].size())
+		return KN_ERR_INVALID_ARGUMENT;
+	auto inputs = found->second;
+	inputs[player][byte] ^= u8(xor_mask);
+	std::vector<KnInput> ffi_inputs;
+	for (auto const &input : inputs)
+		ffi_inputs.push_back({input.data(), u32(input.size())});
+	int const result = kn_host_session_apply_confirmed_frame(
+			m_impl->session, frame, ffi_inputs.data(), u32(ffi_inputs.size()));
+	m_impl->rollback_replay_active = false;
+	return result;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE const char *kn_web_metrics()
+{
+	return s_web_adapter ? s_web_adapter->web_metrics() : "{\"ready\":false}";
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_input_bridge_version()
+{
+	return 3;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_build_profile()
+{
+#if defined(__wasm_simd128__)
+	return 1;
+#else
+	return 0;
+#endif
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_native_scale_version()
+{
+	return 1;
+}
+
+// Used by browser bridge validation to prime the OSD poll cache at a known
+// boundary. It does not advance simulation or inject input.
+extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_poll_input()
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	if (machine)
+		machine->osd().input_update(false);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_worker_version() { return 1; }
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_worker_key(int down, int scan)
+{
+	if (scan <= SDL_SCANCODE_UNKNOWN || scan >= SDL_NUM_SCANCODES) return 0;
+	SDL_Event event{};
+	event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+	event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+	event.key.keysym.scancode = SDL_Scancode(scan);
+	event.key.keysym.sym = SDL_GetKeyFromScancode(SDL_Scancode(scan));
+	return SDL_PushEvent(&event) == 1;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_ui_menu_active()
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	return machine && machine->ui().is_menu_active() ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_set_presentation(double gain, double gamma)
+{
+	running_machine *machine = running_machine::emscripten_get_running_machine();
+	if (!machine || !std::isfinite(gain) || !std::isfinite(gamma) || gain < 0 || gain > 4 || gamma < 0.1 || gamma > 3) return 0;
+	machine->sound().set_master_gain(float(gain));
+	screen_device *screen = screen_device_enumerator(machine->root_device()).first();
+	if (screen) {
+		auto settings = screen->container().get_user_settings();
+		settings.m_gamma = float(gamma);
+		screen->container().set_user_settings(settings);
+	}
+	return 1;
+}
+
+int kaileron_adapter::web_set_runahead(u32 frames)
+{
+	if (frames > 8 || m_impl->spectator || env_enabled("KN_REPLAY_PLAYBACK")) return 0;
+	m_impl->requested_runahead_frames = frames;
+	m_impl->runahead_frames = frames;
+	return 1;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_set_runahead(u32 frames)
+{
+	return s_web_adapter ? s_web_adapter->web_set_runahead(frames) : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void kn_web_stop()
+{
+	emscripten_cancel_main_loop();
+}
+
+int kaileron_adapter::web_snapshot_manifest(u32 frame)
+{
+	return m_impl->state_store.write_snapshot_manifest(frame, "/state/web-snapshot.tsv") ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_snapshot_manifest(u32 frame)
+{
+	return s_web_adapter ? s_web_adapter->web_snapshot_manifest(frame) : 0;
+}
+
+int kaileron_adapter::web_dump_snapshot(u32 frame)
+{
+	u64 hash = 0;
+	return m_impl->state_store.export_snapshot(frame, "/state/web-snapshot.bin", hash) &&
+			m_impl->state_store.write_snapshot_manifest(frame, "/state/web-snapshot.tsv") ? 1 : 0;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_dump_snapshot(u32 frame)
+{
+	return s_web_adapter ? s_web_adapter->web_dump_snapshot(frame) : 0;
+}
+
+int kaileron_adapter::web_replay_control(u32 speed, u32 paused, u32 seek)
+{
+    if (!m_impl->session || !env_enabled("KN_REPLAY_PLAYBACK")) return KN_ERR_INVALID_ARGUMENT;
+    return kn_host_session_replay_control(m_impl->session, env_u32("KN_REPLAY_NAV_END", 0), speed, paused, seek);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_replay_control(u32 speed, u32 paused, u32 seek)
+{
+    return s_web_adapter ? s_web_adapter->web_replay_control(speed, paused, seek) : KN_ERR_INVALID_ARGUMENT;
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int kn_web_correct_input(u32 frame, u32 player, u32 byte, u32 xor_mask)
+{
+	return s_web_adapter
+			? s_web_adapter->web_correct_input(frame, player, byte, xor_mask)
+			: KN_ERR_INVALID_ARGUMENT;
+}
+#endif
