@@ -1084,8 +1084,16 @@ static void set_live_field(ioport_field *field, bool pressed)
 	else
 		field->clear_value();
 
+	// Match ioport_field::frame_update's cabinet coin lockout when publishing
+	// the sampled input immediately.  Forcing a locked coin into live.digital
+	// bypasses MAME's normal filter and can interrupt a game's EEPROM setup.
+	// Keep the sampled/programmatic input intact; MAME also applies the lockout
+	// on its ordinary port update, and held coins work normally once unlocked.
+	bool const coin_locked_out = field->type() >= IPT_COIN1 && field->type() <= IPT_COIN12 &&
+			field->machine().options().coin_lockout() &&
+			field->machine().bookkeeping().coin_lockout_get_state(field->type() - IPT_COIN1);
 	ioport_value &digital = field->port().live().digital;
-	if (pressed)
+	if (pressed && !coin_locked_out)
 		digital |= field->mask();
 	else
 		digital &= ~field->mask();
