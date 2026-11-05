@@ -26,6 +26,9 @@
 #include "h8_port.h"
 #include "h8d.h"
 
+
+
+
 h8_device::h8_device(const machine_config &mconfig, device_type type, const char *tag, device_t *owner, u32 clock, address_map_constructor map_delegate) :
 	cpu_device(mconfig, type, tag, owner, clock),
 	device_nvram_interface(mconfig, *this),
@@ -338,6 +341,9 @@ void h8_device::recompute_bcount(u64 event_time)
 
 void h8_device::execute_run()
 {
+#ifdef __EMSCRIPTEN__
+ const bool kn_idle_enabled = !strcmp(machine().system().name, "tektagtuc1") && !strcmp(tag(), ":sub");
+#endif
 	internal_update(total_cycles());
 
 	m_icount -= m_count_before_instruction_step;
@@ -355,6 +361,26 @@ void h8_device::execute_run()
 
 	while(m_icount > 0) {
 		while(m_icount > m_bcount) {
+#ifdef __EMSCRIPTEN__
+// Batch complete, state-neutral 12-cycle polling loops.
+            // Leave the next internal event / timeslice boundary to the interpreter.
+            if (kn_idle_enabled && m_NPC == 0x182a && m_PC == 0x182c &&
+                m_inst_state == 0x6a28 && !m_inst_substate && m_IR[0] == 0x6a28 &&
+                m_IR[1] == 8 && m_IR[2] == 0x4050 && m_PIR == 0x6a28 &&
+                m_TMP1 == 0x182a && m_TMP2 == 0x6a28 && (m_R[0] & 0xff) == 1 &&
+                !(m_CCR & (F_N | F_Z | F_V)) && !m_has_exr && !m_has_trace &&
+                !m_irq_vector && m_requested_state == -1 && m_current_dma == -1 &&
+                !m_current_dtc && !debugger_enabled() && m_icount - m_bcount > 12) {
+                if (m_program.read_byte(0x84050) == 1 &&
+                    m_cache.read_word(0x182a) == 0x6a28 &&
+                    m_cache.read_word(0x182c) == 8 &&
+                    m_cache.read_word(0x182e) == 0x4050 &&
+                    m_cache.read_word(0x1830) == 0x46f8) {
+                    const int loops = (m_icount - m_bcount - 1) / 12;
+                    m_icount -= loops * 12;
+                }
+            }
+#endif
 			if(m_inst_state < 0x10000) {
 				m_PPC = m_NPC;
 				if(debugger_enabled())

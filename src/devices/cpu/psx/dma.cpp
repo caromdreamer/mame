@@ -48,6 +48,13 @@ void psxdma_device::device_start()
 	{
 		psx_dma_channel *dma = &m_channel[index];
 
+#ifdef __EMSCRIPTEN__
+        // Unused channels are saved too; do not serialize uninitialized fields.
+        dma->n_base=0;
+        dma->n_blockcontrol=0;
+        dma->n_channelcontrol=0;
+        dma->n_ticks=0;
+#endif
 		dma->timer = timer_alloc(FUNC(psxdma_device::dma_finished), this);
 		dma->b_running = 0;
 
