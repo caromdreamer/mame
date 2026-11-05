@@ -66,6 +66,25 @@
  */
 
 #include "emu.h"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+// Private to the single PSX CPU in the tektagtuc1 web engine.
+// Invalidated synchronously whenever its read mappings change.
+static bool kn_psx_fetch_valid;
+static bool kn_psx_fetch_checked;
+static util::notifier_subscription kn_psx_fetch_watch;
+static const address_space *kn_psx_fetch_owner;
+static uint32_t kn_affine_repeat(uint32_t value, uint32_t a, uint32_t c, unsigned n) {
+ uint32_t mul=1,add=0;
+ while(n) { if(n&1) { mul*=a;add=add*a+c; } c*=a+1;a*=a;n>>=1; }
+ return value*mul+add;
+}
+static constexpr uint32_t kn_wait_main[20]={0xc049c22,0x0,0x3c038024,0x8c633804,0x8f840c04,0x24630001,0x31140,0x431021,0x21080,0x431023,0x21080,0x431023,0x21080,0x431021,0x21940,0x431021,0x3c018024,0xac223804,0x1080ffed,0x3c021f08};
+static constexpr uint32_t kn_wait_function[8]={0x8f830b9c,0x0,0x31080,0x431021,0x24420001,0xaf820b9c,0x3e00008,0x0};
+
+#endif
+
 #include "psx.h"
 #include "mdec.h"
 #include "rcnt.h"
@@ -2343,10 +2362,74 @@ void psxcpu_device::execute_set_input( int inputnum, int state )
 
 void psxcpu_device::execute_run()
 {
+#ifdef __EMSCRIPTEN__
+ const bool kn_game=!strcmp(machine().system().name,"tektagtuc1") &&
+     !machine().debug_flags && !debugger_enabled() && m_ram->size()==0x400000;
+ const uint32_t *kn_ram=reinterpret_cast<const uint32_t *>(m_ram->pointer());
+ // Validate once per read-map generation; failed validation stays cached too.
+ if(!kn_game) { kn_psx_fetch_valid=false;kn_psx_fetch_checked=false; }
+ if(kn_game) {
+  if(!kn_psx_fetch_watch || kn_psx_fetch_owner!=m_program) {
+   kn_psx_fetch_valid=false;kn_psx_fetch_checked=false;kn_psx_fetch_owner=m_program;
+   kn_psx_fetch_watch=m_program->add_change_notifier([](read_or_write mode) {
+    if(unsigned(mode)&unsigned(read_or_write::READ)) { kn_psx_fetch_valid=false;kn_psx_fetch_checked=false; }
+   });
+  }
+  if(!kn_psx_fetch_checked && ((m_ram_config&0xf00)==0xc00 || (m_ram_config&0xf00)==0xf00)) {
+   kn_psx_fetch_checked=true;kn_psx_fetch_valid=true;
+   // Validate every aligned word in the bounded guest code window. This is a
+   // deliberately expensive one-time check so read taps/overrides are rejected.
+   const uint8_t *base=m_ram->pointer();
+   for(uint32_t address=0x100000;address<0x1a0000;address+=4) {
+    if(m_program->get_read_ptr(address)!=base+address ||
+       m_program->get_read_ptr(address|0x80000000)!=base+address ||
+       m_program->get_read_ptr(address|0xa0000000)!=base+address) {
+     kn_psx_fetch_valid=false;break;
+    }
+   }
+  }
+ }
+#endif
 	do
 	{
+#ifdef __EMSCRIPTEN__
+        if((m_pc&0x1fffffff)==0x12f3f0 && kn_psx_fetch_valid &&
+           (m_pc&0xe0000000)!=0x20000000 && (m_pc&0xe0000000)!=0x40000000 &&
+           (m_pc&0xe0000000)!=0x60000000 && (m_pc&0xe0000000)!=0xc0000000 &&
+           (m_pc&0xe0000000)!=0xe0000000 && !m_berr && !m_delayr && !m_delayv &&
+           m_op==0x3c021f08 && !(m_pc&m_bad_word_address_mask) &&
+           !(m_cp0r[CP0_DCIC]&DCIC_DE) && !(m_cp0r[CP0_SR]&(SR_ISC|SR_SWC)) &&
+           !((m_cp0r[CP0_SR]&SR_IEC) && (m_cp0r[CP0_SR]&m_cp0r[CP0_CAUSE]&CAUSE_IP)) &&
+           m_r[28]==0x80242cc0 && m_icount>56 &&
+           !memcmp(kn_ram+(0x12f3f0>>2),kn_wait_main,sizeof(kn_wait_main)) &&
+           !memcmp(kn_ram+(0x127088>>2),kn_wait_function,sizeof(kn_wait_function))) {
+            const uint32_t flag=0x2438c4,a1=0x24385c,a2=0x243804;
+            uint8_t *const ram=m_ram->pointer();
+            if(m_program->get_read_ptr(flag|0x80000000)==ram+flag &&
+               m_program->get_read_ptr(a1|0x80000000)==ram+a1 &&
+               m_program->get_read_ptr(a2|0x80000000)==ram+a2 &&
+               m_program->get_write_ptr(a1|0x80000000)==ram+a1 &&
+               m_program->get_write_ptr(a2|0x80000000)==ram+a2 && kn_ram[flag>>2]==0) {
+                auto *kn_seed1=reinterpret_cast<uint32_t *>(ram+a1);
+                auto *kn_seed2=reinterpret_cast<uint32_t *>(ram+a2);
+                {
+                    const unsigned loops=(m_icount-1)/28;
+                    const uint32_t x=kn_affine_repeat(*kn_seed2,69069,69069,loops-1)+1;
+                    *kn_seed1=kn_affine_repeat(*kn_seed1,5,1,loops);
+                    *kn_seed2=x*69069;
+                    m_r[1]=0x80240000;m_r[2]=0x1f080000;m_r[3]=x*66976;
+                    m_r[4]=0;m_r[31]=m_pc+8;
+                    m_icount-=loops*28;
+                }
+            }
+        }
+#endif
 		if( LOG_BIOSCALL ) log_bioscall();
-		debugger_instruction_hook( m_pc );
+#ifdef __EMSCRIPTEN__
+        if(!kn_game) debugger_instruction_hook(m_pc);
+#else
+        debugger_instruction_hook(m_pc);
+#endif
 
 		int breakpoint = program_counter_breakpoint();
 
@@ -2360,7 +2443,19 @@ void psxcpu_device::execute_run()
 		}
 		else
 		{
-			m_op = m_instruction.read_dword(m_pc);
+#ifdef __EMSCRIPTEN__
+            // The original instruction cache reads the program map directly;
+            // CP0 data-cache isolation does not alter that program-map access.
+            // Map changes clear valid before the next instruction is fetched.
+            const uint32_t canonical=m_pc&0x5fffffffU;
+            if(kn_psx_fetch_valid && canonical-0x100000U<0xa0000U &&
+               (m_pc&0xa0000000U)!=0x20000000U)
+                m_op=kn_ram[(canonical&0x1fffffffU)>>2];
+            else
+                m_op=m_instruction.read_dword(m_pc);
+#else
+            m_op=m_instruction.read_dword(m_pc);
+#endif
 
 			if( m_berr )
 			{
